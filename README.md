@@ -99,36 +99,70 @@ These can be customized by modifying the `DEFAULT_DOWNLOAD_DIRS` dictionary in `
 
 ## Docker Deployment
 
-### Building the Image
+### Pre-built Images
+
+Docker images are automatically built and published via GitHub Actions:
+
+- **GitHub Container Registry**: `ghcr.io/fred01/torrent-bot:latest`
+- **Docker Hub**: `fred01/torrent-bot:latest` (if configured)
+
+Available tags:
+- `latest` - Latest stable version from main branch
+- `v1.0.0`, `v1.0`, `v1` - Semantic version tags
+- `main` - Latest from main branch
+
+### Using Pre-built Images
 
 ```bash
-docker build -t torrent-bot .
-```
-
-### Running with Docker
-
-```bash
+# Using GitHub Container Registry
 docker run -d \
   --name torrent-bot \
   -e TELEGRAM_BOT_TOKEN="your_token" \
   -e TRANSMISSION_URL="http://transmission:9091" \
   -e TRANSMISSION_USER="username" \
   -e TRANSMISSION_PASS="password" \
-  torrent-bot
+  ghcr.io/fred01/torrent-bot:latest
+
+# Using Docker Hub (if available)
+docker run -d \
+  --name torrent-bot \
+  -e TELEGRAM_BOT_TOKEN="your_token" \
+  -e TRANSMISSION_URL="http://transmission:9091" \
+  -e TRANSMISSION_USER="username" \
+  -e TRANSMISSION_PASS="password" \
+  fred01/torrent-bot:latest
+```
+
+### Building Locally
+
+```bash
+docker build -t torrent-bot .
 ```
 
 ### Docker Compose
 
-The included `docker-compose.yml` provides a complete setup with both the bot and Transmission:
+Two Docker Compose configurations are provided:
 
+#### Production (using published images)
 ```bash
-# Configure environment
+# Use pre-built images from GitHub Container Registry
 cp .env.example .env
 # Edit .env with your settings
 
-# Start services
-docker-compose up -d
+docker-compose -f docker-compose.prod.yml up -d
+```
 
+#### Development (building locally)
+```bash
+# Build from local source code
+cp .env.example .env
+# Edit .env with your settings
+
+docker-compose up -d
+```
+
+Common commands:
+```bash
 # View logs
 docker-compose logs -f torrent-bot
 
@@ -200,6 +234,40 @@ docker logs -f torrent-bot
 # Manual run
 # Logs are printed to stdout
 ```
+
+## CI/CD and Container Registry
+
+### Automated Docker Builds
+
+This repository includes GitHub Actions workflows that automatically build and publish Docker images:
+
+#### GitHub Container Registry (Default)
+- **Workflow**: `.github/workflows/docker-build-push.yml`
+- **Registry**: `ghcr.io/fred01/torrent-bot`
+- **Authentication**: Uses `GITHUB_TOKEN` (automatic)
+- **Multi-architecture**: Supports `linux/amd64` and `linux/arm64`
+
+#### Docker Hub (Optional)
+- **Workflow**: `.github/workflows/docker-hub.yml`
+- **Registry**: `fred01/torrent-bot`
+- **Requirements**: Repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`
+
+### Build Triggers
+
+Images are built automatically on:
+- Push to `main` or `develop` branches
+- Git tags starting with `v` (e.g., `v1.0.0`)
+- Manual workflow dispatch
+- Pull requests (build only, no push)
+
+### Setting up Docker Hub (Optional)
+
+To enable Docker Hub publishing, add these repository secrets:
+
+1. Go to repository Settings → Secrets and variables → Actions
+2. Add the following secrets:
+   - `DOCKERHUB_USERNAME`: Your Docker Hub username
+   - `DOCKERHUB_TOKEN`: Docker Hub access token (not password)
 
 ## Security Considerations
 
