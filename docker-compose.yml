@@ -1,0 +1,41 @@
+services:
+  torrent-bot:
+    build: .
+    container_name: torrent-bot
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TRANSMISSION_URL=${TRANSMISSION_URL:-http://transmission:9091}
+      - TRANSMISSION_USER=${TRANSMISSION_USER}
+      - TRANSMISSION_PASS=${TRANSMISSION_PASS}
+    depends_on:
+      - transmission
+    networks:
+      - torrent-network
+
+  transmission:
+    image: linuxserver/transmission:latest
+    container_name: transmission
+    restart: unless-stopped
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      - TRANSMISSION_WEB_HOME=/combustion-release/
+    volumes:
+      - ./transmission-config:/config
+      - ./downloads:/downloads
+    ports:
+      - "9091:9091"
+      - "51413:51413"
+      - "51413:51413/udp"
+    networks:
+      - torrent-network
+
+networks:
+  torrent-network:
+    driver: bridge
+
+volumes:
+  transmission-config:
+  downloads:

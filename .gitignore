@@ -144,6 +144,13 @@ ENV/
 env.bak/
 venv.bak/
 
+# Docker volumes
+transmission-config/
+downloads/
+
+# Log files
+*.log
+
 # Spyder project settings
 .spyderproject
 .spyproject
