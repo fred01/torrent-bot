@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: torrent-bot
+  namespace: default
+  labels:
+    app: torrent-bot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: torrent-bot
+  template:
+    metadata:
+      labels:
+        app: torrent-bot
+    spec:
+      containers:
+      - name: torrent-bot
+        image: ghcr.io/fred01/torrent-bot:VERSION_PLACEHOLDER
+        imagePullPolicy: Always
+        env:
+        - name: TELEGRAM_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: torrent-bot-secrets
+              key: TELEGRAM_BOT_TOKEN
+        - name: TRANSMISSION_URL
+          valueFrom:
+            secretKeyRef:
+              name: torrent-bot-secrets
+              key: TRANSMISSION_URL
+        - name: TRANSMISSION_USER
+          valueFrom:
+            secretKeyRef:
+              name: torrent-bot-secrets
+              key: TRANSMISSION_USER
+        - name: TRANSMISSION_PASS
+          valueFrom:
+            secretKeyRef:
+              name: torrent-bot-secrets
+              key: TRANSMISSION_PASS
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        # Simple process-based health checks since this is a Telegram bot
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - "ps aux | grep -q '[p]ython.*bot.py' || exit 1"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh  
+            - -c
+            - "ps aux | grep -q '[p]ython.*bot.py' || exit 1"
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+      restartPolicy: Always
+
+---
+# Basic service for potential future monitoring/management
+apiVersion: v1
+kind: Service
+metadata:
+  name: torrent-bot-service
+  namespace: default
+  labels:
+    app: torrent-bot
+spec:
+  selector:
+    app: torrent-bot
+  # No ports defined since this is just a Telegram bot
+  # This service exists mainly for potential future monitoring integrations
+  type: ClusterIP
