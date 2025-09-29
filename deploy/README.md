@@ -53,38 +53,43 @@ This will:
 
 ## Deployed Resources
 
-The deployment creates the following Kubernetes resources:
+The deployment creates the following Kubernetes resources in the `torrent-bot` namespace:
 
-- **Deployment**: `torrent-bot` - Runs the bot container
+- **Namespace**: `torrent-bot` - Dedicated namespace for the application
+- **Deployment**: `torrent-bot` - Runs the bot container with health checks
 - **Secret**: `torrent-bot-secrets` - Contains environment variables
-- **Service**: `torrent-bot-service` - Basic service for potential future monitoring
+- **Service**: `torrent-bot-service` - Exposes health check endpoint for monitoring
 
 ## Resource Configuration
 
 The deployment is configured with:
 - **Replicas**: 1 (single instance)
 - **CPU Request**: 100m
-- **CPU Limit**: 200m  
+- **CPU Limit**: 200m
 - **Memory Request**: 128Mi
 - **Memory Limit**: 256Mi
-- **Health Checks**: Process-based liveness and readiness probes
+- **Health Checks**: HTTP-based liveness and readiness probes on `/healthz` endpoint
 
 ## Monitoring
 
 The bot includes health checks that verify the Python process is running. You can check the status with:
 
 ```bash
-# Check deployment status
-kubectl get deployment torrent-bot
+# Check deployment status  
+kubectl get deployment torrent-bot -n torrent-bot
 
 # Check pod status
-kubectl get pods -l app=torrent-bot
+kubectl get pods -l app=torrent-bot -n torrent-bot
 
 # View logs
-kubectl logs -l app=torrent-bot -f
+kubectl logs -l app=torrent-bot -n torrent-bot -f
 
 # Check deployment rollout status
-kubectl rollout status deployment/torrent-bot
+kubectl rollout status deployment/torrent-bot -n torrent-bot
+
+# Test health endpoint
+kubectl port-forward -n torrent-bot service/torrent-bot-service 8080:8080 &
+curl http://localhost:8080/healthz
 ```
 
 ## Updating
@@ -113,14 +118,14 @@ This will perform a rolling update of the deployment.
 
 ```bash
 # Check pod details
-kubectl describe pod -l app=torrent-bot
+kubectl describe pod -l app=torrent-bot -n torrent-bot
 
 # Check events
-kubectl get events --sort-by=.metadata.creationTimestamp
+kubectl get events -n torrent-bot --sort-by=.metadata.creationTimestamp
 
 # Check secrets
-kubectl get secret torrent-bot-secrets -o yaml
+kubectl get secret torrent-bot-secrets -n torrent-bot -o yaml
 
 # Check deployment details
-kubectl describe deployment torrent-bot
+kubectl describe deployment torrent-bot -n torrent-bot
 ```

@@ -8,6 +8,8 @@ import re
 import logging
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import transmission_rpc
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -49,6 +51,35 @@ DEFAULT_DOWNLOAD_DIRS = {
 
 # Magnet link regex pattern
 MAGNET_PATTERN = re.compile(r'magnet:\?[^\s]+')
+
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """Simple HTTP handler for health checks"""
+    
+    def do_GET(self):
+        if self.path == '/healthz':
+            # Simple health check - if we can respond, we're healthy
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        # Suppress HTTP server logs to reduce noise
+        pass
+
+
+def start_health_server():
+    """Start a simple HTTP server for health checks on port 8080"""
+    try:
+        server = HTTPServer(('0.0.0.0', 8080), HealthCheckHandler)
+        logger.info("Health check server started on port 8080")
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"Failed to start health check server: {e}")
 
 
 class TransmissionClient:
@@ -248,6 +279,10 @@ def main() -> None:
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN environment variable is required")
         return
+    
+    # Start health check server in a separate thread
+    health_thread = threading.Thread(target=start_health_server, daemon=True)
+    health_thread.start()
     
     # Create the Application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()

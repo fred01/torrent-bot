@@ -59,15 +59,18 @@ cleanup() {
 trap cleanup EXIT
 
 # Replace placeholders in secrets template
-sed "s/TELEGRAM_BOT_TOKEN_PLACEHOLDER/$TELEGRAM_BOT_TOKEN_B64/g; \
-     s/TRANSMISSION_URL_PLACEHOLDER/$TRANSMISSION_URL_B64/g; \
-     s/TRANSMISSION_USER_PLACEHOLDER/$TRANSMISSION_USER_B64/g; \
-     s/TRANSMISSION_PASS_PLACEHOLDER/$TRANSMISSION_PASS_B64/g" \
+sed "s/{{ TELEGRAM_BOT_TOKEN_PLACEHOLDER }}/$TELEGRAM_BOT_TOKEN_B64/g; \
+     s/{{ TRANSMISSION_URL_PLACEHOLDER }}/$TRANSMISSION_URL_B64/g; \
+     s/{{ TRANSMISSION_USER_PLACEHOLDER }}/$TRANSMISSION_USER_B64/g; \
+     s/{{ TRANSMISSION_PASS_PLACEHOLDER }}/$TRANSMISSION_PASS_B64/g" \
     torrent-bot-secrets.yaml > "$TEMP_SECRETS"
 
 # Replace version placeholder in deployment template
-sed "s/VERSION_PLACEHOLDER/$VERSION/g" \
+sed "s/{{ VERSION_PLACEHOLDER }}/$VERSION/g" \
     torrent-bot-k8s.yaml > "$TEMP_DEPLOYMENT"
+
+echo "Creating namespace if it doesn't exist..."
+kubectl create namespace torrent-bot --dry-run=client -o yaml | kubectl apply -f -
 
 echo "Applying Kubernetes secrets..."
 kubectl apply -f "$TEMP_SECRETS"
@@ -79,7 +82,7 @@ echo "Deployment completed successfully!"
 echo "Checking deployment status..."
 
 # Wait for deployment to be ready
-kubectl rollout status deployment/torrent-bot --timeout=300s
+kubectl rollout status deployment/torrent-bot -n torrent-bot --timeout=300s
 
 echo "Torrent bot version $VERSION has been deployed successfully!"
 echo "The bot is running as a Kubernetes deployment and will automatically connect to Telegram."
