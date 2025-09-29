@@ -14,6 +14,7 @@ This directory contains Kubernetes deployment files and scripts for deploying th
 1. `kubectl` configured to connect to your Kubernetes cluster
 2. `.env` file in the project root with required environment variables
 3. Docker image `ghcr.io/fred01/torrent-bot:<version>` available (built by GitHub Actions)
+4. TLS certificate for `torrent-bot.svc.fred.org.ru` (should be available as `torrent-bot-tls` secret in the namespace)
 
 ## Environment Variables
 
@@ -27,7 +28,15 @@ TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
 TRANSMISSION_URL=http://localhost:9091
 TRANSMISSION_USER=your_transmission_username
 TRANSMISSION_PASS=your_transmission_password
+
+# Webhook Configuration (for production deployment)
+WEBHOOK_MODE=true
+WEBHOOK_URL=https://torrent-bot.svc.fred.org.ru/update
+WEBHOOK_PORT=8443
+WEBHOOK_LISTEN=0.0.0.0
 ```
+
+**Note**: The Kubernetes deployment automatically sets `WEBHOOK_MODE=true` to use webhook mode instead of long polling for better performance and reliability.
 
 ## Deployment
 
@@ -56,9 +65,10 @@ This will:
 The deployment creates the following Kubernetes resources in the `torrent-bot` namespace:
 
 - **Namespace**: `torrent-bot` - Dedicated namespace for the application
-- **Deployment**: `torrent-bot` - Runs the bot container with health checks
+- **Deployment**: `torrent-bot` - Runs the bot container with health checks and webhook support
 - **Secret**: `torrent-bot-secrets` - Contains environment variables
-- **Service**: `torrent-bot-service` - Exposes health check endpoint for monitoring
+- **Service**: `torrent-bot-service` - Exposes health check and webhook endpoints
+- **Ingress**: `torrent-bot-ingress` - Routes external traffic from `torrent-bot.svc.fred.org.ru` to the bot
 
 ## Resource Configuration
 
@@ -69,6 +79,8 @@ The deployment is configured with:
 - **Memory Request**: 128Mi
 - **Memory Limit**: 256Mi
 - **Health Checks**: HTTP-based liveness and readiness probes on `/healthz` endpoint
+- **Webhook Mode**: Uses Telegram webhooks instead of long polling for better performance
+- **External Access**: Available at `https://torrent-bot.svc.fred.org.ru/update` for webhook updates
 
 ## Monitoring
 

@@ -40,6 +40,21 @@ spec:
             secretKeyRef:
               name: torrent-bot-secrets
               key: TRANSMISSION_PASS
+        - name: WEBHOOK_MODE
+          value: "true"
+        - name: WEBHOOK_URL
+          value: "https://torrent-bot.svc.fred.org.ru/update"
+        - name: WEBHOOK_PORT
+          value: "8443"
+        - name: WEBHOOK_LISTEN
+          value: "0.0.0.0"
+        ports:
+        - name: health
+          containerPort: 8080
+          protocol: TCP
+        - name: webhook
+          containerPort: 8443
+          protocol: TCP
         resources:
           requests:
             memory: "128Mi"
@@ -81,4 +96,44 @@ spec:
     port: 8080
     targetPort: 8080
     protocol: TCP
+  - name: webhook
+    port: 8443
+    targetPort: 8443
+    protocol: TCP
   type: ClusterIP
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: torrent-bot-ingress
+  namespace: torrent-bot
+  labels:
+    app: torrent-bot
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+spec:
+  tls:
+  - hosts:
+    - torrent-bot.svc.fred.org.ru
+    secretName: torrent-bot-tls
+  rules:
+  - host: torrent-bot.svc.fred.org.ru
+    http:
+      paths:
+      - path: /update
+        pathType: Prefix
+        backend:
+          service:
+            name: torrent-bot-service
+            port:
+              number: 8443
+      - path: /healthz
+        pathType: Prefix
+        backend:
+          service:
+            name: torrent-bot-service
+            port:
+              number: 8080

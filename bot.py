@@ -39,6 +39,12 @@ TRANSMISSION_URL = os.getenv('TRANSMISSION_URL', 'http://localhost:9091')
 TRANSMISSION_USER = os.getenv('TRANSMISSION_USER')
 TRANSMISSION_PASS = os.getenv('TRANSMISSION_PASS')
 
+# Webhook configuration
+WEBHOOK_MODE = os.getenv('WEBHOOK_MODE', 'false').lower() == 'true'
+WEBHOOK_URL = os.getenv('WEBHOOK_URL', 'https://torrent-bot.svc.fred.org.ru/update')
+WEBHOOK_PORT = int(os.getenv('WEBHOOK_PORT', '8443'))
+WEBHOOK_LISTEN = os.getenv('WEBHOOK_LISTEN', '0.0.0.0')
+
 # Default download directories if not available from Transmission
 DEFAULT_DOWNLOAD_DIRS = {
     '🎬 Movies': '/downloads/movies',
@@ -80,6 +86,28 @@ def start_health_server():
         server.serve_forever()
     except Exception as e:
         logger.error(f"Failed to start health check server: {e}")
+
+
+async def setup_webhook(application):
+    """Set up webhook for the bot"""
+    try:
+        await application.bot.set_webhook(
+            url=WEBHOOK_URL,
+            allowed_updates=["message", "callback_query"]
+        )
+        logger.info(f"Webhook set to {WEBHOOK_URL}")
+    except Exception as e:
+        logger.error(f"Failed to set webhook: {e}")
+        raise
+
+
+async def remove_webhook(application):
+    """Remove webhook when shutting down"""
+    try:
+        await application.bot.delete_webhook()
+        logger.info("Webhook removed")
+    except Exception as e:
+        logger.error(f"Failed to remove webhook: {e}")
 
 
 class TransmissionClient:
@@ -294,9 +322,23 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(handle_callback))
     
-    # Run the bot until the user presses Ctrl-C
-    logger.info("Starting Torrent Bot...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    if WEBHOOK_MODE:
+        # Webhook mode
+        logger.info(f"Starting Torrent Bot in webhook mode on {WEBHOOK_LISTEN}:{WEBHOOK_PORT}")
+        logger.info(f"Webhook URL: {WEBHOOK_URL}")
+        
+        # Set up webhook and run
+        application.run_webhook(
+            listen=WEBHOOK_LISTEN,
+            port=WEBHOOK_PORT,
+            url_path="/update",
+            webhook_url=WEBHOOK_URL,
+            allowed_updates=["message", "callback_query"]
+        )
+    else:
+        # Polling mode (default)
+        logger.info("Starting Torrent Bot in polling mode...")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == '__main__':
