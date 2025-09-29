@@ -108,7 +108,8 @@ Docker images are automatically built and published via GitHub Actions:
 
 Available tags:
 - `latest` - Latest stable version from main branch
-- `v1.0.0`, `v1.0`, `v1` - Semantic version tags
+- `<build_number>` - Specific build version (e.g., `10`, `11`, `12`)
+- `v1.0.0`, `v1.0`, `v1` - Semantic version tags (if using git tags)
 - `main` - Latest from main branch
 
 ### Using Pre-built Images
@@ -170,6 +171,55 @@ docker-compose logs -f torrent-bot
 docker-compose down
 ```
 
+## Kubernetes Deployment
+
+The project includes Kubernetes deployment files for production deployment to a Kubernetes cluster.
+
+### Prerequisites
+
+- Kubernetes cluster with `kubectl` configured
+- `.env` file with required environment variables
+
+### Quick Deployment
+
+1. Configure your environment:
+```bash
+cp .env.example .env
+# Edit .env with your actual values
+```
+
+2. Deploy to Kubernetes:
+```bash
+cd deploy
+./deploy.sh <version>
+```
+
+Example:
+```bash
+./deploy.sh 10  # Deploy version 10
+```
+
+### What Gets Deployed
+
+- **Deployment**: Single replica torrent-bot container
+- **Secret**: Environment variables (automatically base64 encoded)
+- **Service**: Basic service for potential monitoring
+
+### Monitoring
+
+```bash
+# Check deployment status
+kubectl get deployment torrent-bot
+
+# View logs
+kubectl logs -l app=torrent-bot -f
+
+# Check rollout status
+kubectl rollout status deployment/torrent-bot
+```
+
+See [`deploy/README.md`](deploy/README.md) for detailed deployment documentation.
+
 ## Development
 
 ### Setup Development Environment
@@ -199,6 +249,11 @@ torrent-bot/
 ├── docker-compose.yml    # Docker Compose setup
 ├── .env.example         # Environment template
 ├── .gitignore           # Git ignore rules
+├── deploy/               # Kubernetes deployment files
+│   ├── deploy.sh         # Deployment script
+│   ├── torrent-bot-k8s.yaml      # K8s manifests
+│   ├── torrent-bot-secrets.yaml  # Secrets template
+│   └── README.md         # Deployment documentation
 └── README.md            # This file
 ```
 
