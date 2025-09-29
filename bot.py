@@ -8,6 +8,8 @@ import re
 import logging
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import transmission_rpc
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -37,6 +39,12 @@ TRANSMISSION_URL = os.getenv('TRANSMISSION_URL', 'http://localhost:9091')
 TRANSMISSION_USER = os.getenv('TRANSMISSION_USER')
 TRANSMISSION_PASS = os.getenv('TRANSMISSION_PASS')
 
+# Webhook configuration
+WEBHOOK_MODE = os.getenv('WEBHOOK_MODE', 'false').lower() == 'true'
+WEBHOOK_URL = os.getenv('WEBHOOK_URL', 'https://torrent-bot.svc.fred.org.ru/update')
+WEBHOOK_PORT = int(os.getenv('WEBHOOK_PORT', '8443'))
+WEBHOOK_LISTEN = os.getenv('WEBHOOK_LISTEN', '0.0.0.0')
+
 # Default download directories if not available from Transmission
 DEFAULT_DOWNLOAD_DIRS = {
     '🎬 Movies': '/downloads/movies',
@@ -49,6 +57,57 @@ DEFAULT_DOWNLOAD_DIRS = {
 
 # Magnet link regex pattern
 MAGNET_PATTERN = re.compile(r'magnet:\?[^\s]+')
+
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    """Simple HTTP handler for health checks"""
+    
+    def do_GET(self):
+        if self.path == '/healthz':
+            # Simple health check - if we can respond, we're healthy
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        # Suppress HTTP server logs to reduce noise
+        pass
+
+
+def start_health_server():
+    """Start a simple HTTP server for health checks on port 8080"""
+    try:
+        server = HTTPServer(('0.0.0.0', 8080), HealthCheckHandler)
+        logger.info("Health check server started on port 8080")
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"Failed to start health check server: {e}")
+
+
+async def setup_webhook(application):
+    """Set up webhook for the bot"""
+    try:
+        await application.bot.set_webhook(
+            url=WEBHOOK_URL,
+            allowed_updates=["message", "callback_query"]
+        )
+        logger.info(f"Webhook set to {WEBHOOK_URL}")
+    except Exception as e:
+        logger.error(f"Failed to set webhook: {e}")
+        raise
+
+
+async def remove_webhook(application):
+    """Remove webhook when shutting down"""
+    try:
+        await application.bot.delete_webhook()
+        logger.info("Webhook removed")
+    except Exception as e:
+        logger.error(f"Failed to remove webhook: {e}")
 
 
 class TransmissionClient:
@@ -249,6 +308,10 @@ def main() -> None:
         logger.error("TELEGRAM_BOT_TOKEN environment variable is required")
         return
     
+    # Start health check server in a separate thread
+    health_thread = threading.Thread(target=start_health_server, daemon=True)
+    health_thread.start()
+    
     # Create the Application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
@@ -259,9 +322,23 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(handle_callback))
     
-    # Run the bot until the user presses Ctrl-C
-    logger.info("Starting Torrent Bot...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    if WEBHOOK_MODE:
+        # Webhook mode
+        logger.info(f"Starting Torrent Bot in webhook mode on {WEBHOOK_LISTEN}:{WEBHOOK_PORT}")
+        logger.info(f"Webhook URL: {WEBHOOK_URL}")
+        
+        # Set up webhook and run
+        application.run_webhook(
+            listen=WEBHOOK_LISTEN,
+            port=WEBHOOK_PORT,
+            url_path="/update",
+            webhook_url=WEBHOOK_URL,
+            allowed_updates=["message", "callback_query"]
+        )
+    else:
+        # Polling mode (default)
+        logger.info("Starting Torrent Bot in polling mode...")
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == '__main__':

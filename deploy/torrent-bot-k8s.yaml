@@ -1,0 +1,139 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: torrent-bot
+  namespace: torrent-bot
+  labels:
+    app: torrent-bot
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: torrent-bot
+  template:
+    metadata:
+      labels:
+        app: torrent-bot
+    spec:
+      containers:
+      - name: torrent-bot
+        image: ghcr.io/fred01/torrent-bot:{{ VERSION_PLACEHOLDER }}
+        imagePullPolicy: Always
+        env:
+        - name: TELEGRAM_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: torrent-bot-secrets
+              key: TELEGRAM_BOT_TOKEN
+        - name: TRANSMISSION_URL
+          valueFrom:
+            secretKeyRef:
+              name: torrent-bot-secrets
+              key: TRANSMISSION_URL
+        - name: TRANSMISSION_USER
+          valueFrom:
+            secretKeyRef:
+              name: torrent-bot-secrets
+              key: TRANSMISSION_USER
+        - name: TRANSMISSION_PASS
+          valueFrom:
+            secretKeyRef:
+              name: torrent-bot-secrets
+              key: TRANSMISSION_PASS
+        - name: WEBHOOK_MODE
+          value: "true"
+        - name: WEBHOOK_URL
+          value: "https://torrent-bot.svc.fred.org.ru/update"
+        - name: WEBHOOK_PORT
+          value: "8443"
+        - name: WEBHOOK_LISTEN
+          value: "0.0.0.0"
+        ports:
+        - name: health
+          containerPort: 8080
+          protocol: TCP
+        - name: webhook
+          containerPort: 8443
+          protocol: TCP
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        # HTTP-based health checks using /healthz endpoint
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+      restartPolicy: Always
+
+---
+# Basic service for potential future monitoring/management
+apiVersion: v1
+kind: Service
+metadata:
+  name: torrent-bot-service
+  namespace: torrent-bot
+  labels:
+    app: torrent-bot
+spec:
+  selector:
+    app: torrent-bot
+  ports:
+  - name: health
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+  - name: webhook
+    port: 8443
+    targetPort: 8443
+    protocol: TCP
+  type: ClusterIP
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: torrent-bot-ingress
+  namespace: torrent-bot
+  labels:
+    app: torrent-bot
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+spec:
+  tls:
+  - hosts:
+    - torrent-bot.svc.fred.org.ru
+    secretName: torrent-bot-tls
+  rules:
+  - host: torrent-bot.svc.fred.org.ru
+    http:
+      paths:
+      - path: /update
+        pathType: Prefix
+        backend:
+          service:
+            name: torrent-bot-service
+            port:
+              number: 8443
+      - path: /healthz
+        pathType: Prefix
+        backend:
+          service:
+            name: torrent-bot-service
+            port:
+              number: 8080
