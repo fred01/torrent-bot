@@ -47,12 +47,12 @@ WEBHOOK_PORT = 8080  # Fixed port for all endpoints
 
 # Default download directories if not available from Transmission
 DEFAULT_DOWNLOAD_DIRS = {
-    '🎬 Movies': '/downloads/movies',
-    '📺 TV Shows': '/downloads/tvshows', 
-    '📚 Books': '/downloads/books',
-    '🎵 Music': '/downloads/music',
-    '🎮 Games': '/downloads/games',
-    '📁 Other': '/downloads/other'
+    '🎬 Movies': '/downloads/complete/movies',
+    '📺 TV Shows': '/downloads/complete/tvseries',
+    '📚 Books': '/downloads/complete/books',
+    '🎮 Games': '/downloads/complete/games',
+    '📁 Other': '/downloads/complete/soft',
+    '📖 Courses': '/downloads/complete/courses'
 }
 
 # Magnet link regex pattern
