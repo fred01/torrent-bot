@@ -8,8 +8,7 @@ import re
 import logging
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import asyncio
 
 import transmission_rpc
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -22,6 +21,7 @@ from telegram.ext import (
     filters,
 )
 from dotenv import load_dotenv
+from aiohttp import web
 
 # Load environment variables
 load_dotenv()
@@ -42,8 +42,8 @@ TRANSMISSION_PASS = os.getenv('TRANSMISSION_PASS')
 # Webhook configuration
 WEBHOOK_MODE = os.getenv('WEBHOOK_MODE', 'false').lower() == 'true'
 WEBHOOK_URL = os.getenv('WEBHOOK_URL', 'https://torrent-bot.svc.fred.org.ru/update')
-WEBHOOK_PORT = int(os.getenv('WEBHOOK_PORT', '8443'))
 WEBHOOK_LISTEN = os.getenv('WEBHOOK_LISTEN', '0.0.0.0')
+WEBHOOK_PORT = 8080  # Fixed port for all endpoints
 
 # Default download directories if not available from Transmission
 DEFAULT_DOWNLOAD_DIRS = {
@@ -59,123 +59,101 @@ DEFAULT_DOWNLOAD_DIRS = {
 MAGNET_PATTERN = re.compile(r'magnet:\?[^\s]+')
 
 
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    """Simple HTTP handler for health checks"""
-    
-    def do_GET(self):
-        if self.path == '/healthz':
-            # Simple health check - if we can respond, we're healthy
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(b'OK')
-        elif self.path == '/status':
-            # Status page showing bot and Transmission connection status
-            self.send_response(200)
-            self.send_header('Content-type', 'text/html; charset=utf-8')
-            self.end_headers()
-            
-            # Get Transmission status
-            transmission_status = self._get_transmission_status()
-            
-            # Generate HTML status page
-            html_content = self._generate_status_page(transmission_status)
-            self.wfile.write(html_content.encode('utf-8'))
-        else:
-            self.send_response(404)
-            self.end_headers()
-    
-    def _get_transmission_status(self):
-        """Get Transmission connection status and details"""
-        status = {
-            'connected': False,
-            'error': None,
-            'version': None,
-            'download_dir': None,
-            'active_torrents': 0
-        }
-        
-        try:
-            if transmission_client.client:
-                session = transmission_client.client.get_session()
-                torrents = transmission_client.client.get_torrents()
-                status['connected'] = True
-                status['version'] = session.version
-                status['download_dir'] = session.download_dir
-                status['active_torrents'] = len(torrents)
-            else:
-                status['error'] = 'Transmission client not initialized'
-        except Exception as e:
-            status['error'] = str(e)
-        
-        return status
-    
-    def _generate_status_page(self, transmission_status):
-        """Generate HTML status page"""
-        # Load HTML template
-        template_path = os.path.join(os.path.dirname(__file__), 'status_page.html')
-        with open(template_path, 'r', encoding='utf-8') as f:
-            html = f.read()
-        
-        # Prepare values for substitution
-        app_status = "✅ Running" if transmission_status['connected'] else "⚠️ Running (Transmission not connected)"
-        transmission_icon = "✅" if transmission_status['connected'] else "❌"
-        transmission_text = "Connected" if transmission_status['connected'] else "Disconnected"
-        webhook_mode = 'Enabled' if WEBHOOK_MODE else 'Disabled (Polling)'
-        
-        # Build transmission details section
-        transmission_details = ""
-        if transmission_status['connected']:
-            transmission_details = """
-            <div class="status-row">
-                <div class="status-label">Version:</div>
-                <div class="status-value">{{VERSION}}</div>
-            </div>
-            <div class="status-row">
-                <div class="status-label">Download Directory:</div>
-                <div class="status-value">{{DOWNLOAD_DIR}}</div>
-            </div>
-            <div class="status-row">
-                <div class="status-label">Active Torrents:</div>
-                <div class="status-value">{{ACTIVE_TORRENTS}}</div>
-            </div>"""
-            transmission_details = transmission_details.replace('{{VERSION}}', str(transmission_status['version']))
-            transmission_details = transmission_details.replace('{{DOWNLOAD_DIR}}', str(transmission_status['download_dir']))
-            transmission_details = transmission_details.replace('{{ACTIVE_TORRENTS}}', str(transmission_status['active_torrents']))
-        
-        # Build error section
-        error_section = ""
-        if transmission_status['error']:
-            error_section = """
-            <div class="error-box">
-                <strong>Connection Error:</strong><br>
-                {{ERROR_MESSAGE}}
-            </div>"""
-            error_section = error_section.replace('{{ERROR_MESSAGE}}', str(transmission_status['error']))
-        
-        # Substitute values in template
-        html = html.replace('{{APP_STATUS}}', app_status)
-        html = html.replace('{{WEBHOOK_MODE}}', webhook_mode)
-        html = html.replace('{{TRANSMISSION_ICON}}', transmission_icon)
-        html = html.replace('{{TRANSMISSION_TEXT}}', transmission_text)
-        html = html.replace('{{TRANSMISSION_DETAILS}}', transmission_details)
-        html = html.replace('{{ERROR_SECTION}}', error_section)
-        
-        return html
-    
-    def log_message(self, format, *args):
-        # Suppress HTTP server logs to reduce noise
-        pass
+async def healthz_handler(request):
+    """Health check endpoint handler"""
+    return web.Response(text='OK', status=200)
 
 
-def start_health_server():
-    """Start a simple HTTP server for health checks on port 8080"""
+async def status_handler(request):
+    """Status page endpoint handler"""
+    # Get Transmission status
+    transmission_status = get_transmission_status()
+    
+    # Generate HTML status page
+    html_content = generate_status_page(transmission_status)
+    
+    return web.Response(text=html_content, content_type='text/html', status=200)
+
+
+def get_transmission_status():
+    """Get Transmission connection status and details"""
+    status = {
+        'connected': False,
+        'error': None,
+        'version': None,
+        'download_dir': None,
+        'active_torrents': 0
+    }
+    
     try:
-        server = HTTPServer(('0.0.0.0', 8080), HealthCheckHandler)
-        logger.info("Health check server started on port 8080")
-        server.serve_forever()
+        if transmission_client.client:
+            session = transmission_client.client.get_session()
+            torrents = transmission_client.client.get_torrents()
+            status['connected'] = True
+            status['version'] = session.version
+            status['download_dir'] = session.download_dir
+            status['active_torrents'] = len(torrents)
+        else:
+            status['error'] = 'Transmission client not initialized'
     except Exception as e:
-        logger.error(f"Failed to start health check server: {e}")
+        status['error'] = str(e)
+    
+    return status
+
+
+def generate_status_page(transmission_status):
+    """Generate HTML status page"""
+    # Load HTML template
+    template_path = os.path.join(os.path.dirname(__file__), 'status_page.html')
+    with open(template_path, 'r', encoding='utf-8') as f:
+        html = f.read()
+    
+    # Prepare values for substitution
+    app_status = "✅ Running" if transmission_status['connected'] else "⚠️ Running (Transmission not connected)"
+    transmission_icon = "✅" if transmission_status['connected'] else "❌"
+    transmission_text = "Connected" if transmission_status['connected'] else "Disconnected"
+    webhook_mode = 'Enabled' if WEBHOOK_MODE else 'Disabled (Polling)'
+    
+    # Build transmission details section
+    transmission_details = ""
+    if transmission_status['connected']:
+        transmission_details = """
+        <div class="status-row">
+            <div class="status-label">Version:</div>
+            <div class="status-value">{{VERSION}}</div>
+        </div>
+        <div class="status-row">
+            <div class="status-label">Download Directory:</div>
+            <div class="status-value">{{DOWNLOAD_DIR}}</div>
+        </div>
+        <div class="status-row">
+            <div class="status-label">Active Torrents:</div>
+            <div class="status-value">{{ACTIVE_TORRENTS}}</div>
+        </div>"""
+        transmission_details = transmission_details.replace('{{VERSION}}', str(transmission_status['version']))
+        transmission_details = transmission_details.replace('{{DOWNLOAD_DIR}}', str(transmission_status['download_dir']))
+        transmission_details = transmission_details.replace('{{ACTIVE_TORRENTS}}', str(transmission_status['active_torrents']))
+    
+    # Build error section
+    error_section = ""
+    if transmission_status['error']:
+        error_section = """
+        <div class="error-box">
+            <strong>Connection Error:</strong><br>
+            {{ERROR_MESSAGE}}
+        </div>"""
+        error_section = error_section.replace('{{ERROR_MESSAGE}}', str(transmission_status['error']))
+    
+    # Substitute values in template
+    html = html.replace('{{APP_STATUS}}', app_status)
+    html = html.replace('{{WEBHOOK_MODE}}', webhook_mode)
+    html = html.replace('{{TRANSMISSION_ICON}}', transmission_icon)
+    html = html.replace('{{TRANSMISSION_TEXT}}', transmission_text)
+    html = html.replace('{{TRANSMISSION_DETAILS}}', transmission_details)
+    html = html.replace('{{ERROR_SECTION}}', error_section)
+    
+    return html
+
 
 
 async def setup_webhook(application):
@@ -392,15 +370,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     context.user_data.pop('magnet_link', None)
 
 
+async def telegram_webhook_handler(request):
+    """Handle incoming Telegram webhook updates"""
+    try:
+        # Get the application from the request
+        application = request.app['telegram_application']
+        
+        # Parse the update from the request body
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
+        
+        # Process the update
+        await application.process_update(update)
+        
+        return web.Response(text='OK', status=200)
+    except Exception as e:
+        logger.error(f"Error processing webhook: {e}")
+        return web.Response(text='Error', status=500)
+
+
 def main() -> None:
     """Start the bot."""
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN environment variable is required")
         return
-    
-    # Start health check server in a separate thread
-    health_thread = threading.Thread(target=start_health_server, daemon=True)
-    health_thread.start()
     
     # Create the Application
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -413,18 +406,52 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_callback))
     
     if WEBHOOK_MODE:
-        # Webhook mode
+        # Webhook mode - run with custom web server
         logger.info(f"Starting Torrent Bot in webhook mode on {WEBHOOK_LISTEN}:{WEBHOOK_PORT}")
         logger.info(f"Webhook URL: {WEBHOOK_URL}")
         
-        # Set up webhook and run
-        application.run_webhook(
-            listen=WEBHOOK_LISTEN,
-            port=WEBHOOK_PORT,
-            url_path="/update",
-            webhook_url=WEBHOOK_URL,
-            allowed_updates=["message", "callback_query"]
-        )
+        async def run_webhook():
+            # Initialize the application
+            await application.initialize()
+            await application.start()
+            
+            # Set webhook
+            await application.bot.set_webhook(
+                url=WEBHOOK_URL,
+                allowed_updates=["message", "callback_query"]
+            )
+            logger.info(f"Webhook set to {WEBHOOK_URL}")
+            
+            # Create aiohttp web application
+            app = web.Application()
+            app['telegram_application'] = application
+            
+            # Add routes
+            app.router.add_post('/update', telegram_webhook_handler)
+            app.router.add_get('/healthz', healthz_handler)
+            app.router.add_get('/status', status_handler)
+            
+            # Start the web server
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, WEBHOOK_LISTEN, WEBHOOK_PORT)
+            await site.start()
+            
+            logger.info(f"Web server started on {WEBHOOK_LISTEN}:{WEBHOOK_PORT}")
+            logger.info("Available endpoints: /update, /healthz, /status")
+            
+            # Keep running
+            try:
+                await asyncio.Event().wait()
+            except (KeyboardInterrupt, SystemExit):
+                logger.info("Stopping...")
+            finally:
+                await runner.cleanup()
+                await application.stop()
+                await application.shutdown()
+        
+        # Run the webhook server
+        asyncio.run(run_webhook())
     else:
         # Polling mode (default)
         logger.info("Starting Torrent Bot in polling mode...")

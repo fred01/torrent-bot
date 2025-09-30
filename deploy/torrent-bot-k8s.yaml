@@ -46,16 +46,11 @@ spec:
           value: "true"
         - name: WEBHOOK_URL
           value: "https://torrent-bot.svc.fred.org.ru/update"
-        - name: WEBHOOK_PORT
-          value: "8443"
         - name: WEBHOOK_LISTEN
           value: "0.0.0.0"
         ports:
-        - name: health
+        - name: http
           containerPort: 8080
-          protocol: TCP
-        - name: webhook
-          containerPort: 8443
           protocol: TCP
         resources:
           requests:
@@ -94,13 +89,9 @@ spec:
   selector:
     app: torrent-bot
   ports:
-  - name: health
+  - name: http
     port: 8080
     targetPort: 8080
-    protocol: TCP
-  - name: webhook
-    port: 8443
-    targetPort: 8443
     protocol: TCP
   type: ClusterIP
 
@@ -125,14 +116,7 @@ spec:
   - host: torrent-bot.svc.fred.org.ru
     http:
       paths:
-      - path: /update
-        pathType: Prefix
-        backend:
-          service:
-            name: torrent-bot-service
-            port:
-              number: 8443
-      - path: /healthz
+      - path: /
         pathType: Prefix
         backend:
           service:
