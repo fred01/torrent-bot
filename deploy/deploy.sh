@@ -42,11 +42,20 @@ TRANSMISSION_URL=${TRANSMISSION_URL:-"http://localhost:9091"}
 TRANSMISSION_USER=${TRANSMISSION_USER:-""}
 TRANSMISSION_PASS=${TRANSMISSION_PASS:-""}
 
+# Generate WEBHOOK_SECRET_TOKEN if not set
+if [ -z "$WEBHOOK_SECRET_TOKEN" ]; then
+    echo "WEBHOOK_SECRET_TOKEN not found in .env file, generating a new one..."
+    WEBHOOK_SECRET_TOKEN=$(openssl rand -hex 32)
+    echo "Generated WEBHOOK_SECRET_TOKEN: $WEBHOOK_SECRET_TOKEN"
+    echo "Consider adding this to your .env file for future deployments"
+fi
+
 # Base64 encode the secrets
 TELEGRAM_BOT_TOKEN_B64=$(echo -n "$TELEGRAM_BOT_TOKEN" | base64 -w 0)
 TRANSMISSION_URL_B64=$(echo -n "$TRANSMISSION_URL" | base64 -w 0)
 TRANSMISSION_USER_B64=$(echo -n "$TRANSMISSION_USER" | base64 -w 0)
 TRANSMISSION_PASS_B64=$(echo -n "$TRANSMISSION_PASS" | base64 -w 0)
+WEBHOOK_SECRET_TOKEN_B64=$(echo -n "$WEBHOOK_SECRET_TOKEN" | base64 -w 0)
 
 # Create temporary files for manifests
 TEMP_SECRETS=$(mktemp)
@@ -62,7 +71,8 @@ trap cleanup EXIT
 sed "s/{{ TELEGRAM_BOT_TOKEN_PLACEHOLDER }}/$TELEGRAM_BOT_TOKEN_B64/g; \
      s/{{ TRANSMISSION_URL_PLACEHOLDER }}/$TRANSMISSION_URL_B64/g; \
      s/{{ TRANSMISSION_USER_PLACEHOLDER }}/$TRANSMISSION_USER_B64/g; \
-     s/{{ TRANSMISSION_PASS_PLACEHOLDER }}/$TRANSMISSION_PASS_B64/g" \
+     s/{{ TRANSMISSION_PASS_PLACEHOLDER }}/$TRANSMISSION_PASS_B64/g; \
+     s/{{ WEBHOOK_SECRET_TOKEN_PLACEHOLDER }}/$WEBHOOK_SECRET_TOKEN_B64/g" \
     torrent-bot-secrets.yaml > "$TEMP_SECRETS"
 
 # Replace version placeholder in deployment template

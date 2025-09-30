@@ -42,6 +42,11 @@ spec:
             secretKeyRef:
               name: torrent-bot-secrets
               key: TRANSMISSION_PASS
+        - name: WEBHOOK_SECRET_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: torrent-bot-secrets
+              key: WEBHOOK_SECRET_TOKEN
         - name: WEBHOOK_MODE
           value: "true"
         - name: WEBHOOK_URL
