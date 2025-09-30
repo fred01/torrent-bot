@@ -101,17 +101,8 @@ kind: Ingress
 metadata:
   name: torrent-bot-ingress
   namespace: torrent-bot
-  labels:
-    app: torrent-bot
-  annotations:
-    nginx.ingress.kubernetes.io/ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
-    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
 spec:
-  tls:
-  - hosts:
-    - torrent-bot.svc.fred.org.ru
-    secretName: torrent-bot-tls
+  ingressClassName: nginx
   rules:
   - host: torrent-bot.svc.fred.org.ru
     http:
