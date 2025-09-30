@@ -28,15 +28,9 @@ TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
 TRANSMISSION_URL=http://localhost:9091
 TRANSMISSION_USER=your_transmission_username
 TRANSMISSION_PASS=your_transmission_password
-
-# Webhook Configuration (for production deployment)
-WEBHOOK_MODE=true
-WEBHOOK_URL=https://torrent-bot.svc.fred.org.ru/update
-WEBHOOK_PORT=8443
-WEBHOOK_LISTEN=0.0.0.0
 ```
 
-**Note**: The Kubernetes deployment automatically sets `WEBHOOK_MODE=true` to use webhook mode instead of long polling for better performance and reliability.
+**Note**: The Kubernetes deployment automatically sets `WEBHOOK_MODE=true` and configures the webhook URL. All endpoints (`/update`, `/healthz`, `/status`) are served on port 8080.
 
 ## Deployment
 
@@ -78,9 +72,10 @@ The deployment is configured with:
 - **CPU Limit**: 200m
 - **Memory Request**: 128Mi
 - **Memory Limit**: 256Mi
+- **Port**: All endpoints served on port 8080
 - **Health Checks**: HTTP-based liveness and readiness probes on `/healthz` endpoint
 - **Webhook Mode**: Uses Telegram webhooks instead of long polling for better performance
-- **External Access**: Available at `https://torrent-bot.svc.fred.org.ru/update` for webhook updates
+- **External Access**: All endpoints available at `https://torrent-bot.svc.fred.org.ru/`
 
 ## Monitoring
 
@@ -110,6 +105,9 @@ kubectl port-forward -n torrent-bot service/torrent-bot-service 8080:8080 &
 
 ### Available Endpoints
 
+All endpoints are served on port 8080 and accessible via `https://torrent-bot.svc.fred.org.ru/`:
+
+- **`/update`** - Telegram webhook endpoint for receiving bot updates
 - **`/healthz`** - Simple health check endpoint (returns `OK`)
 - **`/status`** - HTML status page showing bot status and Transmission connection details
 
