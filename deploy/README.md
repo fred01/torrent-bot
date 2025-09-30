@@ -28,9 +28,15 @@ TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
 TRANSMISSION_URL=http://localhost:9091
 TRANSMISSION_USER=your_transmission_username
 TRANSMISSION_PASS=your_transmission_password
+
+# Webhook Security (recommended for production)
+# Generate with: openssl rand -hex 32
+WEBHOOK_SECRET_TOKEN=your_random_secret_token_here
 ```
 
 **Note**: The Kubernetes deployment automatically sets `WEBHOOK_MODE=true` and configures the webhook URL. All endpoints (`/update`, `/healthz`, `/status`) are served on port 8080.
+
+**Security**: If `WEBHOOK_SECRET_TOKEN` is not provided in `.env`, the deploy script will automatically generate one. However, it's recommended to generate and store your own token for consistency across deployments.
 
 ## Deployment
 
@@ -49,6 +55,7 @@ Example:
 
 This will:
 - Read environment variables from `../.env`
+- Generate a webhook secret token if not provided (recommended to set your own)
 - Base64 encode the secrets
 - Apply the secrets to Kubernetes
 - Deploy the torrent-bot with the specified version
@@ -107,9 +114,11 @@ kubectl port-forward -n torrent-bot service/torrent-bot-service 8080:8080 &
 
 All endpoints are served on port 8080 and accessible via `https://torrent-bot.svc.fred.org.ru/`:
 
-- **`/update`** - Telegram webhook endpoint for receiving bot updates
+- **`/update`** - Telegram webhook endpoint for receiving bot updates (secured with secret token)
 - **`/healthz`** - Simple health check endpoint (returns `OK`)
 - **`/status`** - HTML status page showing bot status and Transmission connection details
+
+**Security**: The `/update` endpoint validates the `X-Telegram-Bot-Api-Secret-Token` header to ensure requests are from Telegram.
 
 ## Updating
 

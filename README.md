@@ -64,6 +64,25 @@ The bot uses environment variables for configuration:
 | `TRANSMISSION_URL` | No | `http://localhost:9091` | Transmission RPC URL |
 | `TRANSMISSION_USER` | No | - | Transmission username (if auth enabled) |
 | `TRANSMISSION_PASS` | No | - | Transmission password (if auth enabled) |
+| `WEBHOOK_MODE` | No | `false` | Enable webhook mode (`true` or `false`) |
+| `WEBHOOK_URL` | No | `https://torrent-bot.svc.fred.org.ru/update` | Webhook URL for Telegram |
+| `WEBHOOK_SECRET_TOKEN` | No | - | Secret token for webhook security (recommended for production) |
+
+### Webhook Security
+
+When using webhook mode in production, it is **strongly recommended** to set a `WEBHOOK_SECRET_TOKEN` to secure your webhook endpoint. This token is used to verify that incoming webhook requests are actually from Telegram.
+
+Generate a secure token:
+```bash
+openssl rand -hex 32
+```
+
+Add it to your `.env` file:
+```bash
+WEBHOOK_SECRET_TOKEN=your_generated_secret_token_here
+```
+
+Without this token, your webhook endpoint will accept any POST requests, which could be a security risk.
 
 ## Usage
 
@@ -377,7 +396,9 @@ To enable Docker Hub publishing, add these repository secrets:
 - The Docker container runs as a non-root user
 - Environment variables should never be committed to version control
 - Use strong passwords for Transmission authentication
+- **Always set `WEBHOOK_SECRET_TOKEN`** when using webhook mode in production to secure the `/update` endpoint
 - Consider running behind a reverse proxy for additional security
+- The webhook secret token is validated using Telegram's `X-Telegram-Bot-Api-Secret-Token` header
 
 ## Contributing
 

@@ -44,6 +44,7 @@ WEBHOOK_MODE = os.getenv('WEBHOOK_MODE', 'false').lower() == 'true'
 WEBHOOK_URL = os.getenv('WEBHOOK_URL', 'https://torrent-bot.svc.fred.org.ru/update')
 WEBHOOK_LISTEN = os.getenv('WEBHOOK_LISTEN', '0.0.0.0')
 WEBHOOK_PORT = 8080  # Fixed port for all endpoints
+WEBHOOK_SECRET_TOKEN = os.getenv('WEBHOOK_SECRET_TOKEN')
 
 # Default download directories if not available from Transmission
 DEFAULT_DOWNLOAD_DIRS = {
@@ -161,7 +162,8 @@ async def setup_webhook(application):
     try:
         await application.bot.set_webhook(
             url=WEBHOOK_URL,
-            allowed_updates=["message", "callback_query"]
+            allowed_updates=["message", "callback_query"],
+            secret_token=WEBHOOK_SECRET_TOKEN
         )
         logger.info(f"Webhook set to {WEBHOOK_URL}")
     except Exception as e:
@@ -373,6 +375,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def telegram_webhook_handler(request):
     """Handle incoming Telegram webhook updates"""
     try:
+        # Verify secret token if configured
+        if WEBHOOK_SECRET_TOKEN:
+            secret_token_header = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
+            if secret_token_header != WEBHOOK_SECRET_TOKEN:
+                logger.warning(f"Invalid webhook secret token from {request.remote}")
+                return web.Response(text='Unauthorized', status=401)
+        
         # Get the application from the request
         application = request.app['telegram_application']
         
@@ -410,6 +419,11 @@ def main() -> None:
         logger.info(f"Starting Torrent Bot in webhook mode on {WEBHOOK_LISTEN}:{WEBHOOK_PORT}")
         logger.info(f"Webhook URL: {WEBHOOK_URL}")
         
+        # Warn if secret token is not set
+        if not WEBHOOK_SECRET_TOKEN:
+            logger.warning("WEBHOOK_SECRET_TOKEN is not set. Webhook endpoint is not secured!")
+            logger.warning("Set WEBHOOK_SECRET_TOKEN environment variable to secure your webhook.")
+        
         async def run_webhook():
             # Initialize the application
             await application.initialize()
@@ -418,7 +432,8 @@ def main() -> None:
             # Set webhook
             await application.bot.set_webhook(
                 url=WEBHOOK_URL,
-                allowed_updates=["message", "callback_query"]
+                allowed_updates=["message", "callback_query"],
+                secret_token=WEBHOOK_SECRET_TOKEN
             )
             logger.info(f"Webhook set to {WEBHOOK_URL}")
             
