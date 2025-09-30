@@ -69,9 +69,191 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
             self.wfile.write(b'OK')
+        elif self.path == '/status':
+            # Status page showing bot and Transmission connection status
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.end_headers()
+            
+            # Get Transmission status
+            transmission_status = self._get_transmission_status()
+            
+            # Generate HTML status page
+            html_content = self._generate_status_page(transmission_status)
+            self.wfile.write(html_content.encode('utf-8'))
         else:
             self.send_response(404)
             self.end_headers()
+    
+    def _get_transmission_status(self):
+        """Get Transmission connection status and details"""
+        status = {
+            'connected': False,
+            'error': None,
+            'version': None,
+            'download_dir': None,
+            'active_torrents': 0
+        }
+        
+        try:
+            if transmission_client.client:
+                session = transmission_client.client.get_session()
+                torrents = transmission_client.client.get_torrents()
+                status['connected'] = True
+                status['version'] = session.version
+                status['download_dir'] = session.download_dir
+                status['active_torrents'] = len(torrents)
+            else:
+                status['error'] = 'Transmission client not initialized'
+        except Exception as e:
+            status['error'] = str(e)
+        
+        return status
+    
+    def _generate_status_page(self, transmission_status):
+        """Generate HTML status page"""
+        # Determine overall status
+        app_status = "✅ Running" if transmission_status['connected'] else "⚠️ Running (Transmission not connected)"
+        transmission_icon = "✅" if transmission_status['connected'] else "❌"
+        transmission_text = "Connected" if transmission_status['connected'] else "Disconnected"
+        
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Torrent Bot Status</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }}
+        .container {{
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 30px;
+        }}
+        h1 {{
+            color: #333;
+            margin-top: 0;
+            border-bottom: 2px solid #007bff;
+            padding-bottom: 10px;
+        }}
+        .status-section {{
+            margin: 20px 0;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            border-left: 4px solid #007bff;
+        }}
+        .status-section h2 {{
+            margin-top: 0;
+            color: #495057;
+            font-size: 1.2em;
+        }}
+        .status-row {{
+            display: flex;
+            padding: 8px 0;
+            border-bottom: 1px solid #dee2e6;
+        }}
+        .status-row:last-child {{
+            border-bottom: none;
+        }}
+        .status-label {{
+            font-weight: 600;
+            min-width: 180px;
+            color: #495057;
+        }}
+        .status-value {{
+            color: #212529;
+        }}
+        .error-box {{
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            border-radius: 4px;
+            padding: 12px;
+            margin-top: 10px;
+            color: #721c24;
+        }}
+        .success {{
+            color: #28a745;
+        }}
+        .error {{
+            color: #dc3545;
+        }}
+        .warning {{
+            color: #ffc107;
+        }}
+        .footer {{
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #dee2e6;
+            text-align: center;
+            color: #6c757d;
+            font-size: 0.9em;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 Torrent Bot Status</h1>
+        
+        <div class="status-section">
+            <h2>Application Status</h2>
+            <div class="status-row">
+                <div class="status-label">Status:</div>
+                <div class="status-value">{app_status}</div>
+            </div>
+            <div class="status-row">
+                <div class="status-label">Webhook Mode:</div>
+                <div class="status-value">{'Enabled' if WEBHOOK_MODE else 'Disabled (Polling)'}</div>
+            </div>
+        </div>
+        
+        <div class="status-section">
+            <h2>Transmission Connection</h2>
+            <div class="status-row">
+                <div class="status-label">Status:</div>
+                <div class="status-value">{transmission_icon} {transmission_text}</div>
+            </div>"""
+        
+        if transmission_status['connected']:
+            html += f"""
+            <div class="status-row">
+                <div class="status-label">Version:</div>
+                <div class="status-value">{transmission_status['version']}</div>
+            </div>
+            <div class="status-row">
+                <div class="status-label">Download Directory:</div>
+                <div class="status-value">{transmission_status['download_dir']}</div>
+            </div>
+            <div class="status-row">
+                <div class="status-label">Active Torrents:</div>
+                <div class="status-value">{transmission_status['active_torrents']}</div>
+            </div>"""
+        
+        if transmission_status['error']:
+            html += f"""
+            <div class="error-box">
+                <strong>Connection Error:</strong><br>
+                {transmission_status['error']}
+            </div>"""
+        
+        html += """
+        </div>
+        
+        <div class="footer">
+            Torrent Bot - Telegram bot for managing torrents via Transmission
+        </div>
+    </div>
+</body>
+</html>"""
+        
+        return html
     
     def log_message(self, format, *args):
         # Suppress HTTP server logs to reduce noise
