@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Torrent Bot Status</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            padding: 30px;
+        }
+        h1 {
+            color: #333;
+            margin-top: 0;
+            border-bottom: 2px solid #007bff;
+            padding-bottom: 10px;
+        }
+        .status-section {
+            margin: 20px 0;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            border-left: 4px solid #007bff;
+        }
+        .status-section h2 {
+            margin-top: 0;
+            color: #495057;
+            font-size: 1.2em;
+        }
+        .status-row {
+            display: flex;
+            padding: 8px 0;
+            border-bottom: 1px solid #dee2e6;
+        }
+        .status-row:last-child {
+            border-bottom: none;
+        }
+        .status-label {
+            font-weight: 600;
+            min-width: 180px;
+            color: #495057;
+        }
+        .status-value {
+            color: #212529;
+        }
+        .error-box {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            border-radius: 4px;
+            padding: 12px;
+            margin-top: 10px;
+            color: #721c24;
+        }
+        .success {
+            color: #28a745;
+        }
+        .error {
+            color: #dc3545;
+        }
+        .warning {
+            color: #ffc107;
+        }
+        .footer {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #dee2e6;
+            text-align: center;
+            color: #6c757d;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 Torrent Bot Status</h1>
+        
+        <div class="status-section">
+            <h2>Application Status</h2>
+            <div class="status-row">
+                <div class="status-label">Status:</div>
+                <div class="status-value">{{APP_STATUS}}</div>
+            </div>
+            <div class="status-row">
+                <div class="status-label">Webhook Mode:</div>
+                <div class="status-value">{{WEBHOOK_MODE}}</div>
+            </div>
+        </div>
+        
+        <div class="status-section">
+            <h2>Transmission Connection</h2>
+            <div class="status-row">
+                <div class="status-label">Status:</div>
+                <div class="status-value">{{TRANSMISSION_ICON}} {{TRANSMISSION_TEXT}}</div>
+            </div>{{TRANSMISSION_DETAILS}}{{ERROR_SECTION}}
+        </div>
+        
+        <div class="footer">
+            Torrent Bot - Telegram bot for managing torrents via Transmission
+        </div>
+    </div>
+</body>
+</html>

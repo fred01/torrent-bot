@@ -112,146 +112,54 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     
     def _generate_status_page(self, transmission_status):
         """Generate HTML status page"""
-        # Determine overall status
+        # Load HTML template
+        template_path = os.path.join(os.path.dirname(__file__), 'status_page.html')
+        with open(template_path, 'r', encoding='utf-8') as f:
+            html = f.read()
+        
+        # Prepare values for substitution
         app_status = "✅ Running" if transmission_status['connected'] else "⚠️ Running (Transmission not connected)"
         transmission_icon = "✅" if transmission_status['connected'] else "❌"
         transmission_text = "Connected" if transmission_status['connected'] else "Disconnected"
+        webhook_mode = 'Enabled' if WEBHOOK_MODE else 'Disabled (Polling)'
         
-        html = f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Torrent Bot Status</title>
-    <style>
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            max-width: 800px;
-            margin: 40px auto;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }}
-        .container {{
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            padding: 30px;
-        }}
-        h1 {{
-            color: #333;
-            margin-top: 0;
-            border-bottom: 2px solid #007bff;
-            padding-bottom: 10px;
-        }}
-        .status-section {{
-            margin: 20px 0;
-            padding: 15px;
-            background-color: #f8f9fa;
-            border-radius: 5px;
-            border-left: 4px solid #007bff;
-        }}
-        .status-section h2 {{
-            margin-top: 0;
-            color: #495057;
-            font-size: 1.2em;
-        }}
-        .status-row {{
-            display: flex;
-            padding: 8px 0;
-            border-bottom: 1px solid #dee2e6;
-        }}
-        .status-row:last-child {{
-            border-bottom: none;
-        }}
-        .status-label {{
-            font-weight: 600;
-            min-width: 180px;
-            color: #495057;
-        }}
-        .status-value {{
-            color: #212529;
-        }}
-        .error-box {{
-            background-color: #f8d7da;
-            border: 1px solid #f5c6cb;
-            border-radius: 4px;
-            padding: 12px;
-            margin-top: 10px;
-            color: #721c24;
-        }}
-        .success {{
-            color: #28a745;
-        }}
-        .error {{
-            color: #dc3545;
-        }}
-        .warning {{
-            color: #ffc107;
-        }}
-        .footer {{
-            margin-top: 30px;
-            padding-top: 20px;
-            border-top: 1px solid #dee2e6;
-            text-align: center;
-            color: #6c757d;
-            font-size: 0.9em;
-        }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🤖 Torrent Bot Status</h1>
-        
-        <div class="status-section">
-            <h2>Application Status</h2>
-            <div class="status-row">
-                <div class="status-label">Status:</div>
-                <div class="status-value">{app_status}</div>
-            </div>
-            <div class="status-row">
-                <div class="status-label">Webhook Mode:</div>
-                <div class="status-value">{'Enabled' if WEBHOOK_MODE else 'Disabled (Polling)'}</div>
-            </div>
-        </div>
-        
-        <div class="status-section">
-            <h2>Transmission Connection</h2>
-            <div class="status-row">
-                <div class="status-label">Status:</div>
-                <div class="status-value">{transmission_icon} {transmission_text}</div>
-            </div>"""
-        
+        # Build transmission details section
+        transmission_details = ""
         if transmission_status['connected']:
-            html += f"""
+            transmission_details = """
             <div class="status-row">
                 <div class="status-label">Version:</div>
-                <div class="status-value">{transmission_status['version']}</div>
+                <div class="status-value">{{VERSION}}</div>
             </div>
             <div class="status-row">
                 <div class="status-label">Download Directory:</div>
-                <div class="status-value">{transmission_status['download_dir']}</div>
+                <div class="status-value">{{DOWNLOAD_DIR}}</div>
             </div>
             <div class="status-row">
                 <div class="status-label">Active Torrents:</div>
-                <div class="status-value">{transmission_status['active_torrents']}</div>
+                <div class="status-value">{{ACTIVE_TORRENTS}}</div>
             </div>"""
+            transmission_details = transmission_details.replace('{{VERSION}}', str(transmission_status['version']))
+            transmission_details = transmission_details.replace('{{DOWNLOAD_DIR}}', str(transmission_status['download_dir']))
+            transmission_details = transmission_details.replace('{{ACTIVE_TORRENTS}}', str(transmission_status['active_torrents']))
         
+        # Build error section
+        error_section = ""
         if transmission_status['error']:
-            html += f"""
+            error_section = """
             <div class="error-box">
                 <strong>Connection Error:</strong><br>
-                {transmission_status['error']}
+                {{ERROR_MESSAGE}}
             </div>"""
+            error_section = error_section.replace('{{ERROR_MESSAGE}}', str(transmission_status['error']))
         
-        html += """
-        </div>
-        
-        <div class="footer">
-            Torrent Bot - Telegram bot for managing torrents via Transmission
-        </div>
-    </div>
-</body>
-</html>"""
+        # Substitute values in template
+        html = html.replace('{{APP_STATUS}}', app_status)
+        html = html.replace('{{WEBHOOK_MODE}}', webhook_mode)
+        html = html.replace('{{TRANSMISSION_ICON}}', transmission_icon)
+        html = html.replace('{{TRANSMISSION_TEXT}}', transmission_text)
+        html = html.replace('{{TRANSMISSION_DETAILS}}', transmission_details)
+        html = html.replace('{{ERROR_SECTION}}', error_section)
         
         return html
     
