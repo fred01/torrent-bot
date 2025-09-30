@@ -69,9 +69,99 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
             self.wfile.write(b'OK')
+        elif self.path == '/status':
+            # Status page showing bot and Transmission connection status
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.end_headers()
+            
+            # Get Transmission status
+            transmission_status = self._get_transmission_status()
+            
+            # Generate HTML status page
+            html_content = self._generate_status_page(transmission_status)
+            self.wfile.write(html_content.encode('utf-8'))
         else:
             self.send_response(404)
             self.end_headers()
+    
+    def _get_transmission_status(self):
+        """Get Transmission connection status and details"""
+        status = {
+            'connected': False,
+            'error': None,
+            'version': None,
+            'download_dir': None,
+            'active_torrents': 0
+        }
+        
+        try:
+            if transmission_client.client:
+                session = transmission_client.client.get_session()
+                torrents = transmission_client.client.get_torrents()
+                status['connected'] = True
+                status['version'] = session.version
+                status['download_dir'] = session.download_dir
+                status['active_torrents'] = len(torrents)
+            else:
+                status['error'] = 'Transmission client not initialized'
+        except Exception as e:
+            status['error'] = str(e)
+        
+        return status
+    
+    def _generate_status_page(self, transmission_status):
+        """Generate HTML status page"""
+        # Load HTML template
+        template_path = os.path.join(os.path.dirname(__file__), 'status_page.html')
+        with open(template_path, 'r', encoding='utf-8') as f:
+            html = f.read()
+        
+        # Prepare values for substitution
+        app_status = "✅ Running" if transmission_status['connected'] else "⚠️ Running (Transmission not connected)"
+        transmission_icon = "✅" if transmission_status['connected'] else "❌"
+        transmission_text = "Connected" if transmission_status['connected'] else "Disconnected"
+        webhook_mode = 'Enabled' if WEBHOOK_MODE else 'Disabled (Polling)'
+        
+        # Build transmission details section
+        transmission_details = ""
+        if transmission_status['connected']:
+            transmission_details = """
+            <div class="status-row">
+                <div class="status-label">Version:</div>
+                <div class="status-value">{{VERSION}}</div>
+            </div>
+            <div class="status-row">
+                <div class="status-label">Download Directory:</div>
+                <div class="status-value">{{DOWNLOAD_DIR}}</div>
+            </div>
+            <div class="status-row">
+                <div class="status-label">Active Torrents:</div>
+                <div class="status-value">{{ACTIVE_TORRENTS}}</div>
+            </div>"""
+            transmission_details = transmission_details.replace('{{VERSION}}', str(transmission_status['version']))
+            transmission_details = transmission_details.replace('{{DOWNLOAD_DIR}}', str(transmission_status['download_dir']))
+            transmission_details = transmission_details.replace('{{ACTIVE_TORRENTS}}', str(transmission_status['active_torrents']))
+        
+        # Build error section
+        error_section = ""
+        if transmission_status['error']:
+            error_section = """
+            <div class="error-box">
+                <strong>Connection Error:</strong><br>
+                {{ERROR_MESSAGE}}
+            </div>"""
+            error_section = error_section.replace('{{ERROR_MESSAGE}}', str(transmission_status['error']))
+        
+        # Substitute values in template
+        html = html.replace('{{APP_STATUS}}', app_status)
+        html = html.replace('{{WEBHOOK_MODE}}', webhook_mode)
+        html = html.replace('{{TRANSMISSION_ICON}}', transmission_icon)
+        html = html.replace('{{TRANSMISSION_TEXT}}', transmission_text)
+        html = html.replace('{{TRANSMISSION_DETAILS}}', transmission_details)
+        html = html.replace('{{ERROR_SECTION}}', error_section)
+        
+        return html
     
     def log_message(self, format, *args):
         # Suppress HTTP server logs to reduce noise

@@ -102,7 +102,16 @@ kubectl rollout status deployment/torrent-bot -n torrent-bot
 # Test health endpoint
 kubectl port-forward -n torrent-bot service/torrent-bot-service 8080:8080 &
 curl http://localhost:8080/healthz
+
+# View status page (with bot and Transmission status)
+kubectl port-forward -n torrent-bot service/torrent-bot-service 8080:8080 &
+# Then open http://localhost:8080/status in your browser
 ```
+
+### Available Endpoints
+
+- **`/healthz`** - Simple health check endpoint (returns `OK`)
+- **`/status`** - HTML status page showing bot status and Transmission connection details
 
 ## Updating
 
