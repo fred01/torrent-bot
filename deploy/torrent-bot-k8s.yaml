@@ -15,6 +15,8 @@ spec:
       labels:
         app: torrent-bot
     spec:
+      imagePullSecrets:
+      - name: ghcr-credentials
       containers:
       - name: torrent-bot
         image: ghcr.io/fred01/torrent-bot:{{ VERSION_PLACEHOLDER }}
