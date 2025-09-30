@@ -11,6 +11,7 @@ A Telegram bot that adds magnet links to Transmission via RPC API. The bot provi
 - ⚙️ Environment-based configuration
 - 📝 Comprehensive logging and error handling
 - 🔒 Secure non-root container execution
+- 📊 Built-in status page for monitoring bot and Transmission connection
 
 ## Quick Start
 
@@ -96,6 +97,43 @@ The bot provides predefined download categories that map to directory paths:
 - Other → `/downloads/other`
 
 These can be customized by modifying the `DEFAULT_DOWNLOAD_DIRS` dictionary in `bot.py`.
+
+## Monitoring
+
+The bot includes built-in HTTP endpoints for monitoring and status checking:
+
+### Health Check Endpoint
+
+**URL**: `http://localhost:8080/healthz`
+
+A simple health check endpoint that returns `OK` if the application is running. Useful for:
+- Docker health checks
+- Kubernetes liveness/readiness probes
+- Load balancer health checks
+
+```bash
+curl http://localhost:8080/healthz
+# Returns: OK
+```
+
+### Status Page
+
+**URL**: `http://localhost:8080/status`
+
+An interactive HTML status page that displays:
+- **Application Status**: Running state and webhook mode
+- **Transmission Connection**: Connection status, version, download directory, and active torrents count
+- **Error Messages**: Detailed error information if Transmission connection fails
+
+Access the status page in your browser to view:
+- Real-time bot status
+- Transmission connectivity status
+- Connection error details for troubleshooting
+
+Example URLs for different deployments:
+- Local: `http://localhost:8080/status`
+- Docker: `http://<container-ip>:8080/status`
+- Kubernetes: `https://torrent-bot.svc.fred.org.ru/status`
 
 ## Docker Deployment
 
@@ -212,6 +250,7 @@ Example:
 The bot is accessible at:
 - **Webhook endpoint**: `https://torrent-bot.svc.fred.org.ru/update` (for Telegram webhook updates)
 - **Health check**: `https://torrent-bot.svc.fred.org.ru/healthz` (for monitoring)
+- **Status page**: `https://torrent-bot.svc.fred.org.ru/status` (for viewing bot and Transmission status)
 
 ### Monitoring
 
@@ -277,7 +316,8 @@ torrent-bot/
 - Verify Transmission is running and accessible
 - Check `TRANSMISSION_URL` format (include http:// or https://)
 - Confirm username/password if authentication is enabled
-- Use `/status` command to check connection
+- Use `/status` command in Telegram or visit `http://localhost:8080/status` in your browser to check connection
+- Review error messages displayed on the status page
 
 **Torrents not downloading:**
 - Check Transmission web interface for errors
