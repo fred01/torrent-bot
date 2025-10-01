@@ -51,8 +51,6 @@ spec:
           value: "true"
         - name: WEBHOOK_URL
           value: "https://torrent-bot.svc.fred.org.ru/update"
-        - name: WEBHOOK_LISTEN
-          value: "0.0.0.0"
         ports:
         - name: http
           containerPort: 8080
