@@ -42,7 +42,6 @@ TRANSMISSION_PASS = os.getenv('TRANSMISSION_PASS')
 # Webhook configuration
 WEBHOOK_MODE = os.getenv('WEBHOOK_MODE', 'false').lower() == 'true'
 WEBHOOK_URL = os.getenv('WEBHOOK_URL', 'https://torrent-bot.svc.fred.org.ru/update')
-WEBHOOK_LISTEN = os.getenv('WEBHOOK_LISTEN', '0.0.0.0')
 WEBHOOK_PORT = 8080  # Fixed port for all endpoints
 WEBHOOK_SECRET_TOKEN = os.getenv('WEBHOOK_SECRET_TOKEN')
 
@@ -416,7 +415,7 @@ def main() -> None:
     
     if WEBHOOK_MODE:
         # Webhook mode - run with custom web server
-        logger.info(f"Starting Torrent Bot in webhook mode on {WEBHOOK_LISTEN}:{WEBHOOK_PORT}")
+        logger.info(f"Starting Torrent Bot in webhook mode on port {WEBHOOK_PORT}")
         logger.info(f"Webhook URL: {WEBHOOK_URL}")
         
         # Warn if secret token is not set
@@ -449,10 +448,10 @@ def main() -> None:
             # Start the web server
             runner = web.AppRunner(app)
             await runner.setup()
-            site = web.TCPSite(runner, WEBHOOK_LISTEN, WEBHOOK_PORT)
+            site = web.TCPSite(runner, '0.0.0.0', WEBHOOK_PORT)
             await site.start()
             
-            logger.info(f"Web server started on {WEBHOOK_LISTEN}:{WEBHOOK_PORT}")
+            logger.info(f"Web server started on port {WEBHOOK_PORT}")
             logger.info("Available endpoints: /update, /healthz, /status")
             
             # Keep running
