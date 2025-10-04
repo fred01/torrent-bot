@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import asyncio
 
 import transmission_rpc
+from transmission_rpc.error import TransmissionError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -56,6 +57,9 @@ DEFAULT_DOWNLOAD_DIRS = {
 
 # Magnet link regex pattern
 MAGNET_PATTERN = re.compile(r'magnet:\?[^\s]+')
+
+TORRENT_JOBS_KEY = 'tracked_torrent_jobs'
+TORRENT_POLL_INTERVAL = 30  # seconds
 
 
 async def healthz_handler(request):
@@ -224,23 +228,152 @@ class TransmissionClient:
             logger.error(f"Failed to get download directories: {e}")
             return DEFAULT_DOWNLOAD_DIRS
     
-    def add_torrent(self, magnet_url: str, download_dir: str) -> bool:
+    def add_torrent(self, magnet_url: str, download_dir: str) -> Optional['transmission_rpc.Torrent']:
         """Add magnet link to Transmission"""
         if not self.client:
             logger.error("Transmission client not available")
-            return False
-        
+            return None
+
         try:
             torrent = self.client.add_torrent(magnet_url, download_dir=download_dir)
             logger.info(f"Added torrent: {torrent.name} to {download_dir}")
-            return True
+            return torrent
         except Exception as e:
             logger.error(f"Failed to add torrent: {e}")
-            return False
+            return None
 
 
 # Global transmission client
 transmission_client = TransmissionClient()
+
+
+def _get_torrent_job_store(application: Application) -> Dict[int, object]:
+    return application.bot_data.setdefault(TORRENT_JOBS_KEY, {})
+
+
+def _remove_torrent_job(application: Application, torrent_id: Optional[int], active_job=None) -> None:
+    if torrent_id is None:
+        return
+    jobs = application.bot_data.get(TORRENT_JOBS_KEY)
+    if not jobs:
+        return
+    job = jobs.pop(torrent_id, None)
+    if job and job is not active_job:
+        job.schedule_removal()
+
+
+def schedule_torrent_monitor(application: Application, torrent_id: Optional[int], chat_id: int,
+                             torrent_name: str, download_path: str) -> None:
+    """Schedule periodic checks for a torrent completion."""
+    if torrent_id is None:
+        logger.warning("Cannot schedule monitor: torrent ID is missing")
+        return
+
+    job_queue = application.job_queue
+    if job_queue is None:
+        logger.warning("Job queue is not available, cannot monitor torrent completion")
+        return
+
+    jobs = _get_torrent_job_store(application)
+
+    existing_job = jobs.get(torrent_id)
+    if existing_job:
+        existing_job.schedule_removal()
+
+    job = job_queue.run_repeating(
+        monitor_torrent_completion,
+        interval=TORRENT_POLL_INTERVAL,
+        first=TORRENT_POLL_INTERVAL,
+        data={
+            'torrent_id': torrent_id,
+            'chat_id': chat_id,
+            'torrent_name': torrent_name,
+            'download_path': download_path,
+        },
+        name=f"torrent_monitor_{torrent_id}"
+    )
+    jobs[torrent_id] = job
+
+
+async def monitor_torrent_completion(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Check torrent status and notify the user once it is complete."""
+    job = context.job
+    if not job:
+        return
+
+    data = job.data or {}
+    torrent_id = data.get('torrent_id')
+    chat_id = data.get('chat_id')
+    torrent_name = data.get('torrent_name', 'Torrent')
+    download_path = data.get('download_path')
+
+    if torrent_id is None or chat_id is None:
+        logger.warning("Torrent monitor job missing required data, removing job")
+        job.schedule_removal()
+        if context.application:
+            _remove_torrent_job(context.application, torrent_id, active_job=job)
+        return
+
+    if not transmission_client.client:
+        logger.debug("Transmission client not connected; will retry later")
+        return
+
+    try:
+        torrent = transmission_client.client.get_torrent(torrent_id)
+    except TransmissionError as exc:
+        if '404: Not Found' in str(exc):
+            logger.info(f"Torrent {torrent_id} appears to be removed before completion")
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⚠️ Torrent removed before completion:\n{torrent_name}"
+                )
+            except Exception as send_exc:
+                logger.error(f"Failed to send removal notification for torrent {torrent_id}: {send_exc}")
+            finally:
+                job.schedule_removal()
+                if context.application:
+                    _remove_torrent_job(context.application, torrent_id, active_job=job)
+        else:
+            logger.warning(f"Failed to fetch torrent {torrent_id}: {exc}")
+        return
+    except Exception as exc:
+        logger.error(f"Unexpected error retrieving torrent {torrent_id}: {exc}")
+        return
+
+    progress = getattr(torrent, 'progress', None)
+    percent_done = getattr(torrent, 'percent_done', None)
+    status = getattr(torrent, 'status', '').lower()
+
+    is_complete = False
+    if progress is not None:
+        is_complete = progress >= 100.0
+    elif percent_done is not None:
+        is_complete = percent_done >= 0.999
+
+    if status in {'seeding', 'seed_pending', 'stopped'}:
+        is_complete = True
+
+    if not is_complete:
+        return
+
+    download_dir = getattr(torrent, 'download_dir', None) or download_path
+
+    message_lines = [
+        "✅ Torrent finished downloading!",
+        f"Name: {torrent_name}"
+    ]
+    if download_dir:
+        message_lines.append(f"Location: {download_dir}")
+
+    try:
+        await context.bot.send_message(chat_id=chat_id, text='\n'.join(message_lines))
+    except Exception as exc:
+        logger.error(f"Failed to send completion notification for torrent {torrent_id}: {exc}")
+    finally:
+        job.schedule_removal()
+        if context.application:
+            _remove_torrent_job(context.application, torrent_id, active_job=job)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -348,14 +481,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     
     # Add torrent to Transmission
-    success = transmission_client.add_torrent(magnet_link, download_path)
-    
-    if success:
+    torrent = transmission_client.add_torrent(magnet_link, download_path)
+
+    if torrent:
+        chat_id = query.message.chat_id if query.message else query.from_user.id
+        torrent_id = getattr(torrent, 'id', None)
+        torrent_name = getattr(torrent, 'name', magnet_link)
+
+        if context.application:
+            schedule_torrent_monitor(
+                context.application,
+                torrent_id,
+                chat_id,
+                torrent_name,
+                download_path
+            )
+        else:
+            logger.warning("Application instance missing; torrent completion will not be monitored")
+
         await query.edit_message_text(
             f"✅ Success!\n\n"
             f"Torrent added to Transmission\n"
             f"Download location: {download_path}\n\n"
-            f"You can check the progress in your Transmission client."
+            f"I'll notify you here once the download finishes."
         )
     else:
         await query.edit_message_text(
