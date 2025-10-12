@@ -61,6 +61,9 @@ MAGNET_PATTERN = re.compile(r'magnet:\?[^\s]+')
 TORRENT_JOBS_KEY = 'tracked_torrent_jobs'
 TORRENT_POLL_INTERVAL = 30  # seconds
 
+# Global in-memory store for torrent monitoring tasks
+_torrent_monitor_tasks: Dict[int, asyncio.Task] = {}
+
 
 async def healthz_handler(request):
     """Health check endpoint handler"""
@@ -262,6 +265,16 @@ def _remove_torrent_job(application: Application, torrent_id: Optional[int], act
         job.schedule_removal()
 
 
+def _remove_torrent_task(torrent_id: Optional[int]) -> None:
+    """Remove and cancel a torrent monitoring task."""
+    if torrent_id is None:
+        return
+    task = _torrent_monitor_tasks.pop(torrent_id, None)
+    if task and not task.done():
+        task.cancel()
+        logger.debug(f"Cancelled and removed monitor task for torrent {torrent_id}")
+
+
 def schedule_torrent_monitor(application: Application, torrent_id: Optional[int], chat_id: int,
                              torrent_name: str, download_path: str) -> None:
     """Schedule periodic checks for a torrent completion."""
@@ -269,34 +282,102 @@ def schedule_torrent_monitor(application: Application, torrent_id: Optional[int]
         logger.warning("Cannot schedule monitor: torrent ID is missing")
         return
 
-    job_queue = application.job_queue
-    if job_queue is None:
-        logger.warning("Job queue is not available, cannot monitor torrent completion")
-        return
+    # Cancel existing monitoring task if present
+    if torrent_id in _torrent_monitor_tasks:
+        _torrent_monitor_tasks[torrent_id].cancel()
+        logger.debug(f"Cancelled existing monitor task for torrent {torrent_id}")
 
-    jobs = _get_torrent_job_store(application)
-
-    existing_job = jobs.get(torrent_id)
-    if existing_job:
-        existing_job.schedule_removal()
-
-    job = job_queue.run_repeating(
-        monitor_torrent_completion,
-        interval=TORRENT_POLL_INTERVAL,
-        first=TORRENT_POLL_INTERVAL,
-        data={
-            'torrent_id': torrent_id,
-            'chat_id': chat_id,
-            'torrent_name': torrent_name,
-            'download_path': download_path,
-        },
-        name=f"torrent_monitor_{torrent_id}"
+    # Create a new asyncio task for monitoring
+    task = asyncio.create_task(
+        _monitor_torrent_loop(
+            application=application,
+            torrent_id=torrent_id,
+            chat_id=chat_id,
+            torrent_name=torrent_name,
+            download_path=download_path
+        )
     )
-    jobs[torrent_id] = job
+    _torrent_monitor_tasks[torrent_id] = task
+    logger.info(f"Scheduled torrent monitor for torrent {torrent_id}")
+
+
+async def _monitor_torrent_loop(application: Application, torrent_id: int, chat_id: int,
+                                torrent_name: str, download_path: str) -> None:
+    """Continuously monitor a torrent until it completes."""
+    try:
+        while True:
+            await asyncio.sleep(TORRENT_POLL_INTERVAL)
+            
+            if not transmission_client.client:
+                logger.debug("Transmission client not connected; will retry later")
+                continue
+
+            try:
+                torrent = transmission_client.client.get_torrent(torrent_id)
+            except TransmissionError as exc:
+                if '404: Not Found' in str(exc):
+                    logger.info(f"Torrent {torrent_id} appears to be removed before completion")
+                    try:
+                        await application.bot.send_message(
+                            chat_id=chat_id,
+                            text=f"⚠️ Torrent removed before completion:\n{torrent_name}"
+                        )
+                    except Exception as send_exc:
+                        logger.error(f"Failed to send removal notification for torrent {torrent_id}: {send_exc}")
+                    finally:
+                        _remove_torrent_task(torrent_id)
+                    break
+                else:
+                    logger.warning(f"Failed to fetch torrent {torrent_id}: {exc}")
+                continue
+            except Exception as exc:
+                logger.error(f"Unexpected error retrieving torrent {torrent_id}: {exc}")
+                continue
+
+            progress = getattr(torrent, 'progress', None)
+            percent_done = getattr(torrent, 'percent_done', None)
+            status = getattr(torrent, 'status', '').lower()
+
+            is_complete = False
+            if progress is not None:
+                is_complete = progress >= 100.0
+            elif percent_done is not None:
+                is_complete = percent_done >= 0.999
+
+            if status in {'seeding', 'seed_pending', 'stopped'}:
+                is_complete = True
+
+            if not is_complete:
+                continue
+
+            download_dir = getattr(torrent, 'download_dir', None) or download_path
+
+            message_lines = [
+                "✅ Torrent finished downloading!",
+                f"Name: {torrent_name}"
+            ]
+            if download_dir:
+                message_lines.append(f"Location: {download_dir}")
+
+            try:
+                await application.bot.send_message(chat_id=chat_id, text='\n'.join(message_lines))
+            except Exception as exc:
+                logger.error(f"Failed to send completion notification for torrent {torrent_id}: {exc}")
+            finally:
+                _remove_torrent_task(torrent_id)
+            break
+            
+    except asyncio.CancelledError:
+        logger.debug(f"Torrent monitor task for {torrent_id} was cancelled")
+        raise
 
 
 async def monitor_torrent_completion(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Check torrent status and notify the user once it is complete."""
+    """Check torrent status and notify the user once it is complete.
+    
+    This function is kept for backward compatibility with job_queue if it's available,
+    but the main monitoring is now done via _monitor_torrent_loop using asyncio tasks.
+    """
     job = context.job
     if not job:
         return
