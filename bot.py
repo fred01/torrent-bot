@@ -51,7 +51,9 @@ DEFAULT_DOWNLOAD_DIRS = {
     '📺 TV Shows': '/downloads/complete/tvseries',
     '📚 Books': '/downloads/complete/books',
     '🎮 Games': '/downloads/complete/games',
-    '📁 Other': '/downloads/complete/soft',
+    '📁 Other': '/downloads/complete/other',
+    '💻 Soft': '/downloads/complete/soft',
+    '🎵 Music': '/downloads/complete/music',
     '📖 Courses': '/downloads/complete/courses'
 }
 
