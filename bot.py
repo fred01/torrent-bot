@@ -62,6 +62,7 @@ MAGNET_PATTERN = re.compile(r'magnet:\?[^\s]+')
 
 TORRENT_JOBS_KEY = 'tracked_torrent_jobs'
 TORRENT_POLL_INTERVAL = 30  # seconds
+HEALTHZ_PATH = '/healthz'  # Health check endpoint path
 
 # Global in-memory store for torrent monitoring tasks
 _torrent_monitor_tasks: Dict[int, asyncio.Task] = {}
@@ -672,11 +673,17 @@ def main() -> None:
             
             # Add routes
             app.router.add_post('/update', telegram_webhook_handler)
-            app.router.add_get('/healthz', healthz_handler)
+            app.router.add_get(HEALTHZ_PATH, healthz_handler)
             app.router.add_get('/status', status_handler)
             
-            # Start the web server
-            runner = web.AppRunner(app)
+            # Start the web server with custom access logger
+            class CustomAccessLogger(web.AccessLogger):
+                def log(self, request, response, time):
+                    # Skip logging for /healthz endpoint
+                    if request.path != HEALTHZ_PATH:
+                        super().log(request, response, time)
+            
+            runner = web.AppRunner(app, access_log_class=CustomAccessLogger)
             await runner.setup()
             site = web.TCPSite(runner, '0.0.0.0', 8080)
             await site.start()
