@@ -675,8 +675,14 @@ def main() -> None:
             app.router.add_get('/healthz', healthz_handler)
             app.router.add_get('/status', status_handler)
             
-            # Start the web server
-            runner = web.AppRunner(app)
+            # Start the web server with custom access logger
+            class CustomAccessLogger(web.AccessLogger):
+                def log(self, request, response, time):
+                    # Skip logging for /healthz endpoint
+                    if request.path != '/healthz':
+                        super().log(request, response, time)
+            
+            runner = web.AppRunner(app, access_log_class=CustomAccessLogger)
             await runner.setup()
             site = web.TCPSite(runner, '0.0.0.0', 8080)
             await site.start()
