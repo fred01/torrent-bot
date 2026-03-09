@@ -7,9 +7,13 @@ import os
 import re
 import logging
 from typing import Dict, List, Optional
+from dataclasses import dataclass
+from collections import defaultdict
 from urllib.parse import urlparse
 import asyncio
 
+import requests as http_requests
+from bs4 import BeautifulSoup
 import transmission_rpc
 from transmission_rpc.error import TransmissionError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -39,6 +43,10 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TRANSMISSION_URL = os.getenv('TRANSMISSION_URL', 'http://localhost:9091')
 TRANSMISSION_USER = os.getenv('TRANSMISSION_USER')
 TRANSMISSION_PASS = os.getenv('TRANSMISSION_PASS')
+
+# RuTracker configuration
+RUTRACKER_USERNAME = os.getenv('RUTRACKER_USERNAME')
+RUTRACKER_PASSWORD = os.getenv('RUTRACKER_PASSWORD')
 
 # Webhook configuration
 WEBHOOK_MODE = os.getenv('WEBHOOK_MODE', 'false').lower() == 'true'
@@ -249,8 +257,115 @@ class TransmissionClient:
             return None
 
 
-# Global transmission client
+@dataclass
+class RuTrackerTorrent:
+    topic_id: str
+    title: str
+    forum: str
+    size_bytes: int
+    seeds: int
+    leeches: int
+
+    @property
+    def size_human(self) -> str:
+        b = float(self.size_bytes)
+        for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+            if b < 1024:
+                return f"{b:.1f} {unit}"
+            b /= 1024
+        return f"{b:.1f} ПБ"
+
+
+class RuTrackerClient:
+    BASE_URL = "https://rutracker.org/forum/"
+
+    def __init__(self):
+        self.session: Optional[http_requests.Session] = None
+
+    def _ensure_logged_in(self) -> bool:
+        if self.session and "bb_session" in self.session.cookies.get_dict():
+            return True
+        if not RUTRACKER_USERNAME or not RUTRACKER_PASSWORD:
+            logger.warning("RuTracker credentials not configured")
+            return False
+        self.session = http_requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/109.0",
+        })
+        resp = self.session.post(self.BASE_URL + "login.php", data={
+            "login_username": RUTRACKER_USERNAME,
+            "login_password": RUTRACKER_PASSWORD,
+            "login": "Вход",
+        }, allow_redirects=True)
+        if "bb_session" in self.session.cookies.get_dict():
+            logger.info("RuTracker login successful")
+            return True
+        logger.error("RuTracker login failed")
+        self.session = None
+        return False
+
+    def search(self, query: str) -> List[RuTrackerTorrent]:
+        if not self._ensure_logged_in():
+            return []
+        resp = self.session.get(self.BASE_URL + "tracker.php", params={"nm": query})
+        resp.encoding = "windows-1251"
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        results = []
+        for row in soup.select("tr.tCenter.hl-tr"):
+            topic_id = row.get("data-topic_id", "")
+            forum_el = row.select_one("td.f-name-col a")
+            forum = forum_el.get_text(strip=True) if forum_el else "Неизвестно"
+            title_el = row.select_one("a.tLink")
+            if not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            if not topic_id:
+                topic_id = title_el.get("data-topic_id", "")
+
+            size_td = row.select_one("td.tor-size")
+            size_bytes = 0
+            if size_td:
+                try:
+                    size_bytes = int(size_td.get("data-ts_text", "0"))
+                except ValueError:
+                    pass
+
+            seeds = 0
+            seeds_el = row.select_one("b.seedmed")
+            if seeds_el:
+                try:
+                    seeds = int(seeds_el.get_text(strip=True))
+                except ValueError:
+                    pass
+
+            leeches = 0
+            leech_el = row.select_one("td.leechmed")
+            if leech_el:
+                try:
+                    leeches = int(leech_el.get_text(strip=True))
+                except ValueError:
+                    pass
+
+            results.append(RuTrackerTorrent(
+                topic_id=topic_id, title=title, forum=forum,
+                size_bytes=size_bytes, seeds=seeds, leeches=leeches,
+            ))
+        return results
+
+    def get_magnet(self, topic_id: str) -> Optional[str]:
+        if not self._ensure_logged_in():
+            return None
+        resp = self.session.get(self.BASE_URL + f"viewtopic.php?t={topic_id}")
+        resp.encoding = "windows-1251"
+        soup = BeautifulSoup(resp.text, "lxml")
+        link = soup.select_one("a.magnet-link")
+        return link.get("href") if link else None
+
+
+# Global clients
 transmission_client = TransmissionClient()
+rutracker_client = RuTrackerClient()
 
 
 def _get_torrent_job_store(application: Application) -> Dict[int, object]:
@@ -462,9 +577,11 @@ async def monitor_torrent_completion(context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
+    search_hint = "\n📝 Или просто напишите название — поищу на RuTracker!" if RUTRACKER_USERNAME else ""
     welcome_message = (
         "🤖 Welcome to Torrent Bot!\n\n"
-        "Send me a magnet link and I'll help you download it via Transmission.\n\n"
+        "Send me a magnet link and I'll help you download it via Transmission.\n"
+        f"{search_hint}\n\n"
         "Commands:\n"
         "/start - Show this welcome message\n"
         "/help - Show help information\n"
@@ -475,13 +592,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
+    search_section = (
+        "\n🔍 Поиск на RuTracker:\n"
+        "1. Напишите название (например: Семь самураев)\n"
+        "2. Выберите раздел\n"
+        "3. Выберите раздачу\n"
+        "4. Выберите папку для скачивания\n"
+    ) if RUTRACKER_USERNAME else ""
     help_text = (
         "📖 How to use Torrent Bot:\n\n"
+        "🧲 Magnet-ссылки:\n"
         "1. Send me a magnet link\n"
         "2. Choose a download category from the buttons\n"
-        "3. I'll add it to Transmission for you!\n\n"
-        "Supported magnet link format:\n"
-        "magnet:?xt=urn:btih:...\n\n"
+        "3. I'll add it to Transmission for you!\n"
+        f"{search_section}\n"
         "Available categories:\n"
         "🎬 Movies\n📺 TV Shows\n📚 Books\n🎵 Music\n🎮 Games\n📁 Other"
     )
@@ -512,59 +636,170 @@ def extract_magnet_links(message_text: str) -> List[str]:
     return MAGNET_PATTERN.findall(message_text)
 
 
+def _build_download_keyboard() -> InlineKeyboardMarkup:
+    download_dirs = transmission_client.get_download_dirs()
+    keyboard = [[InlineKeyboardButton(label, callback_data=f"download:{path}")]
+                for label, path in download_dirs.items()]
+    return InlineKeyboardMarkup(keyboard)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle incoming messages and look for magnet links."""
+    """Handle incoming messages: magnet links or search queries."""
     message_text = update.message.text if update.message.text else ""
     magnet_links = extract_magnet_links(message_text)
-    
-    if not magnet_links:
+
+    if magnet_links:
+        context.user_data['magnet_link'] = magnet_links[0]
+        await update.message.reply_text(
+            "🔍 Found magnet link!\n\nPlease choose a download location:",
+            reply_markup=_build_download_keyboard(),
+        )
+        return
+
+    if not RUTRACKER_USERNAME or not RUTRACKER_PASSWORD:
         await update.message.reply_text(
             "I didn't find any magnet links in your message. "
             "Please send a valid magnet link starting with 'magnet:?'"
         )
         return
-    
-    # For now, handle only the first magnet link
-    magnet_link = magnet_links[0]
-    
-    # Store the magnet link in user context
-    context.user_data['magnet_link'] = magnet_link
-    
-    # Get available download directories
-    download_dirs = transmission_client.get_download_dirs()
-    
-    # Create inline keyboard with download options
+
+    query = message_text.strip()
+    if not query:
+        return
+
+    msg = await update.message.reply_text(f"🔍 Ищу '{query}' на RuTracker...")
+    results = await asyncio.to_thread(rutracker_client.search, query)
+
+    if not results:
+        await msg.edit_text("Ничего не найдено.")
+        return
+
+    groups: Dict[str, List[RuTrackerTorrent]] = defaultdict(list)
+    for t in results:
+        groups[t.forum].append(t)
+    for lst in groups.values():
+        lst.sort(key=lambda t: t.seeds, reverse=True)
+
+    context.user_data['rt_results'] = results
+    forum_list = list(groups.keys())
+    context.user_data['rt_forums'] = forum_list
+
+    lines = [f"Найдено {len(results)} раздач в {len(forum_list)} разделах:\n"]
     keyboard = []
-    for label, path in download_dirs.items():
-        keyboard.append([InlineKeyboardButton(label, callback_data=f"download:{path}")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        f"🔍 Found magnet link!\n\n"
-        f"Please choose a download location:",
-        reply_markup=reply_markup
+    for i, forum in enumerate(forum_list):
+        count = len(groups[forum])
+        lines.append(f"{i + 1}. {forum} ({count})")
+        keyboard.append([InlineKeyboardButton(
+            f"{forum} ({count})", callback_data=f"rt_forum:{i}"
+        )])
+    keyboard.append([InlineKeyboardButton("📋 Все разделы", callback_data="rt_forum:all")])
+
+    await msg.edit_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle callback queries from inline keyboards."""
     query = update.callback_query
+    data = query.data
     await query.answer()
-    
-    if not query.data.startswith("download:"):
+
+    if data.startswith("rt_forum:"):
+        await _handle_forum_selection(query, context)
+    elif data.startswith("rt_torrent:"):
+        await _handle_torrent_selection(query, context)
+    elif data.startswith("download:"):
+        await _handle_download_selection(query, context)
+    else:
         await query.edit_message_text("❌ Invalid selection")
+
+
+async def _handle_forum_selection(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    choice = query.data.replace("rt_forum:", "")
+    results: List[RuTrackerTorrent] = context.user_data.get('rt_results', [])
+    forum_list: List[str] = context.user_data.get('rt_forums', [])
+
+    if not results:
+        await query.edit_message_text("❌ Результаты поиска устарели. Попробуйте снова.")
         return
-    
-    # Extract download path from callback data
+
+    if choice == "all":
+        selected = sorted(results, key=lambda t: t.seeds, reverse=True)
+    else:
+        try:
+            idx = int(choice)
+            forum = forum_list[idx]
+        except (ValueError, IndexError):
+            await query.edit_message_text("❌ Некорректный выбор.")
+            return
+        selected = sorted(
+            [t for t in results if t.forum == forum],
+            key=lambda t: t.seeds, reverse=True,
+        )
+
+    context.user_data['rt_selected'] = selected
+
+    lines = []
+    keyboard = []
+    for i, t in enumerate(selected):
+        seed_str = f"🌱{t.seeds}" if t.seeds > 0 else "💀0"
+        label = f"{t.size_human} | {seed_str}"
+        title_short = t.title[:70]
+        lines.append(f"{i + 1}. {title_short}\n   {t.size_human} | {seed_str} сидов | {t.leeches} личей")
+        keyboard.append([InlineKeyboardButton(
+            f"{i + 1}. {t.size_human} | {seed_str}",
+            callback_data=f"rt_torrent:{i}",
+        )])
+
+    await query.edit_message_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def _handle_torrent_selection(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        idx = int(query.data.replace("rt_torrent:", ""))
+    except ValueError:
+        await query.edit_message_text("❌ Некорректный выбор.")
+        return
+
+    selected: List[RuTrackerTorrent] = context.user_data.get('rt_selected', [])
+    if idx < 0 or idx >= len(selected):
+        await query.edit_message_text("❌ Некорректный выбор.")
+        return
+
+    torrent = selected[idx]
+    await query.edit_message_text(f"⏳ Получаю magnet-ссылку для:\n{torrent.title[:100]}...")
+
+    magnet = await asyncio.to_thread(rutracker_client.get_magnet, torrent.topic_id)
+    if not magnet:
+        await query.edit_message_text("❌ Не удалось получить magnet-ссылку.")
+        return
+
+    context.user_data['magnet_link'] = magnet
+    context.user_data.pop('rt_results', None)
+    context.user_data.pop('rt_forums', None)
+    context.user_data.pop('rt_selected', None)
+
+    await query.edit_message_text(
+        f"🧲 {torrent.title[:100]}\n"
+        f"{torrent.size_human} | 🌱 {torrent.seeds} сидов\n\n"
+        f"Выберите папку для скачивания:",
+        reply_markup=_build_download_keyboard(),
+    )
+
+
+async def _handle_download_selection(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     download_path = query.data.replace("download:", "")
     magnet_link = context.user_data.get('magnet_link')
-    
+
     if not magnet_link:
         await query.edit_message_text("❌ No magnet link found. Please send a new one.")
         return
-    
-    # Add torrent to Transmission
+
     torrent = transmission_client.add_torrent(magnet_link, download_path)
 
     if torrent:
@@ -574,31 +809,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         if context.application:
             schedule_torrent_monitor(
-                context.application,
-                torrent_id,
-                chat_id,
-                torrent_name,
-                download_path
+                context.application, torrent_id, chat_id,
+                torrent_name, download_path,
             )
-        else:
-            logger.warning("Application instance missing; torrent completion will not be monitored")
 
         await query.edit_message_text(
-            f"✅ Success!\n\n"
-            f"Torrent added to Transmission\n"
-            f"Download location: {download_path}\n\n"
-            f"I'll notify you here once the download finishes."
+            f"✅ Торрент добавлен в Transmission!\n"
+            f"Папка: {download_path}\n\n"
+            f"Сообщу когда скачается."
         )
     else:
         await query.edit_message_text(
-            f"❌ Failed to add torrent to Transmission.\n\n"
-            f"Please check:\n"
-            f"- Transmission is running and accessible\n"
-            f"- Connection settings are correct\n"
-            f"- The magnet link is valid"
+            "❌ Не удалось добавить торрент в Transmission.\n\n"
+            "Проверьте:\n"
+            "- Transmission запущен и доступен\n"
+            "- Настройки подключения корректны"
         )
-    
-    # Clear the stored magnet link
+
     context.user_data.pop('magnet_link', None)
 
 
