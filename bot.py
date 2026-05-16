@@ -485,6 +485,24 @@ _FILTER_SYSTEM = """\
 
 Только JSON, без текста."""
 
+_CLASSIFY_SYSTEM = """\
+Ты классифицируешь результаты поиска торрент-трекера RuTracker.
+Дан список раздач (номер, раздел форума, название). Отнеси КАЖДУЮ
+раздачу ровно к одной категории по тому, ЧТО это за контент:
+
+- game — игра/репак/портатив (для запуска)
+- movie — фильм
+- tv — сериал
+- music — музыка, саундтреки/OST/Score, аранжировки
+- book — книги, артбуки, комиксы, фанфики (текст)
+- audiobook — аудиокниги
+- software — программы, утилиты
+- other — всё прочее (моды/карты, обои, видео-прохождения и т.п.)
+
+Верни СТРОГО JSON-объект без пояснений: ключ — номер раздачи (строкой),
+значение — категория. Пример: {"0":"game","1":"music","2":"movie"}
+Только JSON, без текста."""
+
 
 class LLMClient:
     """Minimal OpenAI-compatible (OpenWebUI/Ollama) client.
@@ -561,6 +579,39 @@ class LLMClient:
             if isinstance(x, int) and 0 <= x < len(items) and x not in seen:
                 seen.add(x)
                 out.append(x)
+        return out
+
+    def classify_results(self, query: str,
+                         items: List['RuTrackerTorrent']) -> Dict[int, str]:
+        """Classify every item into one of CATEGORY_TO_DIR's categories.
+        Returns {index: category} covering all items ('other' as fallback)."""
+        lines = [f"Пользователь искал: {query}", "", "Раздачи:"]
+        for i, it in enumerate(items):
+            lines.append(f"{i}. [{it.forum}] {it.title}")
+        data = _extract_json(self._chat(_CLASSIFY_SYSTEM, "\n".join(lines)))
+
+        allowed = set(CATEGORY_TO_DIR)
+        out: Dict[int, str] = {}
+        pairs = []
+        if isinstance(data, dict):
+            pairs = list(data.items())
+        elif isinstance(data, list):
+            for el in data:
+                if isinstance(el, dict):
+                    pairs.append((el.get("idx", el.get("index")),
+                                  el.get("category", el.get("cat"))))
+                else:
+                    pairs.append((len(pairs), el))
+        for k, v in pairs:
+            try:
+                idx = int(k)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= idx < len(items):
+                cat = str(v).strip().lower() if v else "other"
+                out[idx] = cat if cat in allowed else "other"
+        for i in range(len(items)):
+            out.setdefault(i, "other")
         return out
 
 
@@ -918,6 +969,99 @@ async def _show_smart_top(edit, selected: List['RuTrackerTorrent'],
     await edit(header, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
+def _bucket_keyboard(buckets: List[dict]) -> List[List[InlineKeyboardButton]]:
+    kb = [
+        [InlineKeyboardButton(f"{b['label']} ({len(b['idxs'])})",
+                              callback_data=f"rt_cat:{n}")]
+        for n, b in enumerate(buckets)
+    ]
+    kb.append([InlineKeyboardButton(
+        "📋 Все разделы (форумы)", callback_data="rt_groups")])
+    return kb
+
+
+async def _show_category_buckets(edit, results: List['RuTrackerTorrent'],
+                                  context: ContextTypes.DEFAULT_TYPE,
+                                  classification: Dict[int, str]) -> None:
+    """Group results into the user's folders via LLM classification,
+    instead of by raw RuTracker forums (used for the 'any' intent)."""
+    context.user_data['rt_results'] = results
+    context.user_data.pop('rt_category', None)
+
+    buckets: Dict[str, dict] = {}
+    for i, t in enumerate(results):
+        cat = classification.get(i, 'other')
+        label = CATEGORY_TO_DIR.get(cat, CATEGORY_TO_DIR['other'])[0]
+        b = buckets.get(label)
+        if b is None:
+            buckets[label] = {
+                'cat': cat if cat in CATEGORY_TO_DIR else 'other',
+                'idxs': [i],
+            }
+        else:
+            b['idxs'].append(i)
+
+    bucket_list = [
+        {'label': lab, 'cat': info['cat'], 'idxs': info['idxs']}
+        for lab, info in sorted(buckets.items(),
+                                key=lambda kv: len(kv[1]['idxs']),
+                                reverse=True)
+    ]
+    context.user_data['rt_buckets'] = bucket_list
+    await edit("🤖 Разложил по категориям — выбери, что качаем:",
+               reply_markup=InlineKeyboardMarkup(
+                   _bucket_keyboard(bucket_list)))
+
+
+async def _reshow_buckets(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    buckets = context.user_data.get('rt_buckets', [])
+    if not buckets:
+        await query.edit_message_text(
+            "❌ Результаты поиска устарели. Попробуйте снова.")
+        return
+    context.user_data.pop('rt_category', None)
+    await query.edit_message_text(
+        "🤖 Категории — выбери, что качаем:",
+        reply_markup=InlineKeyboardMarkup(_bucket_keyboard(buckets)))
+
+
+async def _handle_bucket_selection(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        n = int(query.data.replace("rt_cat:", ""))
+    except ValueError:
+        await query.edit_message_text("❌ Некорректный выбор.")
+        return
+    buckets = context.user_data.get('rt_buckets', [])
+    results: List[RuTrackerTorrent] = context.user_data.get('rt_results', [])
+    if not buckets or not results or not (0 <= n < len(buckets)):
+        await query.edit_message_text(
+            "❌ Результаты поиска устарели. Попробуйте снова.")
+        return
+
+    b = buckets[n]
+    selected = sorted((results[i] for i in b['idxs'] if i < len(results)),
+                      key=lambda t: t.seeds, reverse=True)
+    shown = selected[:SMART_TOP_LIMIT]
+    context.user_data['rt_selected'] = shown
+    context.user_data['rt_category'] = b['cat']  # enables auto-folder
+
+    mapping = CATEGORY_TO_DIR.get(b['cat'])
+    where = f" → «{mapping[0]}»" if mapping else ""
+    header = (f"{b['label']} — {len(selected)} раздач, по сидам. "
+              f"Жми — скачаю{where}:")
+    if len(selected) > SMART_TOP_LIMIT:
+        header += f"\n(показаны топ-{SMART_TOP_LIMIT})"
+    keyboard = [
+        [InlineKeyboardButton(_torrent_button_label(t),
+                              callback_data=f"rt_torrent:{i}")]
+        for i, t in enumerate(shown)
+    ]
+    keyboard.append([InlineKeyboardButton(
+        "⬅️ Категории", callback_data="rt_buckets")])
+    await query.edit_message_text(
+        header, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle incoming messages: magnet links or search queries."""
     message_text = update.message.text if update.message.text else ""
@@ -969,12 +1113,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await msg.edit_text("Ничего не найдено.")
         return
 
-    note = ("⚠️ Умная фильтрация недоступна — показываю все разделы."
-            if llm_failed else "")
+    # Intent parse itself failed -> LLM unreliable, raw forum groups.
+    if llm_failed:
+        await _show_forum_groups(
+            msg.edit_text, results, context,
+            note="⚠️ Умная фильтрация недоступна — показываю все разделы.")
+        return
 
-    # category "any" => user didn't ask for a type: no filtering, no warning.
-    if llm_failed or category == "any":
-        await _show_forum_groups(msg.edit_text, results, context, note=note)
+    # "any": no explicit type -> let the LLM group results into the
+    # user's folders (falls back to raw forums if classification fails).
+    if category == "any":
+        await msg.edit_text("🤖 Раскладываю по категориям…")
+        try:
+            classification = await asyncio.to_thread(
+                llm_client.classify_results, clean_q, results)
+        except Exception as exc:
+            logger.error(f"LLM classify failed: {exc}")
+            classification = None
+        if classification:
+            await _show_category_buckets(
+                msg.edit_text, results, context, classification)
+        else:
+            await _show_forum_groups(
+                msg.edit_text, results, context,
+                note="⚠️ Группировка по категориям недоступна — разделы.")
         return
 
     await msg.edit_text(f"🧠 Отбираю подходящее (тип: {category})…")
@@ -1012,6 +1174,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "❌ Результаты поиска устарели. Попробуйте снова.")
             return
         await _show_forum_groups(query.edit_message_text, results, context)
+    elif data == "rt_buckets":
+        await _reshow_buckets(query, context)
+    elif data.startswith("rt_cat:"):
+        await _handle_bucket_selection(query, context)
     elif data.startswith("rt_forum:"):
         await _handle_forum_selection(query, context)
     elif data.startswith("rt_torrent:"):
