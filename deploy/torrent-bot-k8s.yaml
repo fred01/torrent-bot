@@ -47,6 +47,36 @@ spec:
             secretKeyRef:
               name: torrent-bot-secrets
               key: WEBHOOK_SECRET_TOKEN
+        - name: RUTRACKER_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: torrent-bot-secrets
+              key: RUTRACKER_USERNAME
+        - name: RUTRACKER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: torrent-bot-secrets
+              key: RUTRACKER_PASSWORD
+        - name: AI_LLM_API_BASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: torrent-bot-secrets
+              key: AI_LLM_API_BASE_URL
+        - name: AI_LLM_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: torrent-bot-secrets
+              key: AI_LLM_API_KEY
+        - name: AI_LLM_MODEL
+          valueFrom:
+            secretKeyRef:
+              name: torrent-bot-secrets
+              key: AI_LLM_MODEL
+        - name: AI_LLM_KEEP_ALIVE
+          valueFrom:
+            secretKeyRef:
+              name: torrent-bot-secrets
+              key: AI_LLM_KEEP_ALIVE
         - name: WEBHOOK_MODE
           value: "true"
         - name: WEBHOOK_URL
