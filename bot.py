@@ -73,6 +73,20 @@ DEFAULT_DOWNLOAD_DIRS = {
     '📖 Courses': '/downloads/complete/courses'
 }
 
+# LLM content category -> (button label, download dir). When a search went
+# through the LLM with a confident type, the folder is picked automatically
+# and the category-selection step is skipped.
+CATEGORY_TO_DIR = {
+    'game': ('🎮 Games', '/downloads/complete/games'),
+    'movie': ('🎬 Movies', '/downloads/complete/movies'),
+    'tv': ('📺 TV Shows', '/downloads/complete/tvseries'),
+    'music': ('🎵 Music', '/downloads/complete/music'),
+    'book': ('📚 Books', '/downloads/complete/books'),
+    'audiobook': ('📚 Books', '/downloads/complete/books'),
+    'software': ('💻 Soft', '/downloads/complete/soft'),
+    'other': ('📁 Other', '/downloads/complete/other'),
+}
+
 # Magnet link regex pattern
 MAGNET_PATTERN = re.compile(r'magnet:\?[^\s]+')
 
@@ -838,6 +852,12 @@ def _build_download_keyboard() -> InlineKeyboardMarkup:
 SMART_TOP_LIMIT = 25
 
 
+def _torrent_button_label(t: 'RuTrackerTorrent') -> str:
+    """One-tap button: title first, then size and seeds."""
+    seed_str = f"🌱{t.seeds}" if t.seeds > 0 else "💀0"
+    return f"{t.title[:42]} · {t.size_human} {seed_str}"
+
+
 async def _show_forum_groups(edit, results: List['RuTrackerTorrent'],
                              context: ContextTypes.DEFAULT_TYPE,
                              note: str = "") -> None:
@@ -851,6 +871,9 @@ async def _show_forum_groups(edit, results: List['RuTrackerTorrent'],
     context.user_data['rt_results'] = results
     forum_list = list(groups.keys())
     context.user_data['rt_forums'] = forum_list
+    # Forum browsing means the type is unknown / user opted out of the
+    # filter -> don't auto-pick a folder, ask for the category.
+    context.user_data.pop('rt_category', None)
 
     header = f"{note}\n\n" if note else ""
     lines = [f"{header}Найдено {len(results)} раздач "
@@ -870,25 +893,29 @@ async def _show_forum_groups(edit, results: List['RuTrackerTorrent'],
 async def _show_smart_top(edit, selected: List['RuTrackerTorrent'],
                           context: ContextTypes.DEFAULT_TYPE,
                           category: str, total: int) -> None:
-    """Render the LLM-filtered flat top list (sorted by seeds)."""
+    """Render the LLM-filtered flat top list (sorted by seeds).
+
+    Tapping a button downloads straight away — the folder is chosen
+    automatically from the detected category (no extra picker)."""
     shown = selected[:SMART_TOP_LIMIT]
     context.user_data['rt_selected'] = shown
-    lines = [f"🤖 Отобрано по типу «{category}»: "
-             f"{len(selected)} из {total}. Сортировка по сидам:\n"]
-    keyboard = []
-    for i, t in enumerate(shown):
-        seed_str = f"🌱{t.seeds}" if t.seeds > 0 else "💀0"
-        lines.append(f"{i + 1}. {t.title[:70]}\n"
-                      f"   {t.size_human} | {seed_str} сидов | {t.leeches} личей")
-        keyboard.append([InlineKeyboardButton(
-            f"{i + 1}. {t.size_human} | {seed_str}",
-            callback_data=f"rt_torrent:{i}",
-        )])
+    context.user_data['rt_category'] = category
+
+    mapping = CATEGORY_TO_DIR.get(category)
+    where = f" → «{mapping[0]}»" if mapping else ""
+    header = (f"🤖 По типу «{category}» — {len(selected)} из {total}, "
+              f"по сидам. Жми — скачаю{where}:")
     if len(selected) > SMART_TOP_LIMIT:
-        lines.append(f"\n…показаны топ-{SMART_TOP_LIMIT}.")
+        header += f"\n(показаны топ-{SMART_TOP_LIMIT})"
+
+    keyboard = [
+        [InlineKeyboardButton(_torrent_button_label(t),
+                              callback_data=f"rt_torrent:{i}")]
+        for i, t in enumerate(shown)
+    ]
     keyboard.append([InlineKeyboardButton(
         "📋 Все разделы (без фильтра)", callback_data="rt_groups")])
-    await edit("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
+    await edit(header, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1020,22 +1047,49 @@ async def _handle_forum_selection(query, context: ContextTypes.DEFAULT_TYPE) -> 
 
     context.user_data['rt_selected'] = selected
 
-    lines = []
-    keyboard = []
-    for i, t in enumerate(selected):
-        seed_str = f"🌱{t.seeds}" if t.seeds > 0 else "💀0"
-        label = f"{t.size_human} | {seed_str}"
-        title_short = t.title[:70]
-        lines.append(f"{i + 1}. {title_short}\n   {t.size_human} | {seed_str} сидов | {t.leeches} личей")
-        keyboard.append([InlineKeyboardButton(
-            f"{i + 1}. {t.size_human} | {seed_str}",
-            callback_data=f"rt_torrent:{i}",
-        )])
-
+    title = "📋 Все разделы" if choice == "all" else f"📂 {forum}"
+    header = f"{title} — {len(selected)} раздач. Жми для скачивания:"
+    keyboard = [
+        [InlineKeyboardButton(_torrent_button_label(t),
+                              callback_data=f"rt_torrent:{i}")]
+        for i, t in enumerate(selected)
+    ]
     await query.edit_message_text(
-        "\n".join(lines),
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+        header, reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def _add_torrent_and_notify(query, context: ContextTypes.DEFAULT_TYPE,
+                                  magnet_link: str, download_path: str,
+                                  dir_label: Optional[str] = None,
+                                  title: Optional[str] = None) -> None:
+    """Add the magnet to Transmission, start completion monitoring and
+    report back. Shared by the auto-folder path and the manual picker."""
+    torrent = transmission_client.add_torrent(magnet_link, download_path)
+
+    if torrent:
+        chat_id = query.message.chat_id if query.message else query.from_user.id
+        torrent_id = getattr(torrent, 'id', None)
+        torrent_name = getattr(torrent, 'name', title or magnet_link)
+
+        if context.application:
+            schedule_torrent_monitor(
+                context.application, torrent_id, chat_id,
+                torrent_name, download_path,
+            )
+
+        head = f"✅ Добавлено в Transmission → {dir_label or download_path}"
+        if title:
+            head += f"\n{title[:90]}"
+        await query.edit_message_text(head + "\n\nСообщу когда скачается.")
+    else:
+        await query.edit_message_text(
+            "❌ Не удалось добавить торрент в Transmission.\n\n"
+            "Проверьте:\n"
+            "- Transmission запущен и доступен\n"
+            "- Настройки подключения корректны"
+        )
+
+    context.user_data.pop('magnet_link', None)
 
 
 async def _handle_torrent_selection(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1051,18 +1105,31 @@ async def _handle_torrent_selection(query, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     torrent = selected[idx]
-    await query.edit_message_text(f"⏳ Получаю magnet-ссылку для:\n{torrent.title[:100]}...")
+    await query.edit_message_text(
+        f"⏳ Получаю magnet-ссылку:\n{torrent.title[:100]}…")
 
     magnet = await asyncio.to_thread(rutracker_client.get_magnet, torrent.topic_id)
     if not magnet:
         await query.edit_message_text("❌ Не удалось получить magnet-ссылку.")
         return
 
-    context.user_data['magnet_link'] = magnet
+    category = context.user_data.get('rt_category')
+    mapping = CATEGORY_TO_DIR.get(category) if category else None
+
     context.user_data.pop('rt_results', None)
     context.user_data.pop('rt_forums', None)
     context.user_data.pop('rt_selected', None)
 
+    # Category known from the LLM search -> skip the folder picker.
+    if mapping:
+        dir_label, download_path = mapping
+        context.user_data.pop('rt_category', None)
+        await _add_torrent_and_notify(
+            query, context, magnet, download_path,
+            dir_label=dir_label, title=torrent.title)
+        return
+
+    context.user_data['magnet_link'] = magnet
     await query.edit_message_text(
         f"🧲 {torrent.title[:100]}\n"
         f"{torrent.size_human} | 🌱 {torrent.seeds} сидов\n\n"
@@ -1079,33 +1146,7 @@ async def _handle_download_selection(query, context: ContextTypes.DEFAULT_TYPE) 
         await query.edit_message_text("❌ No magnet link found. Please send a new one.")
         return
 
-    torrent = transmission_client.add_torrent(magnet_link, download_path)
-
-    if torrent:
-        chat_id = query.message.chat_id if query.message else query.from_user.id
-        torrent_id = getattr(torrent, 'id', None)
-        torrent_name = getattr(torrent, 'name', magnet_link)
-
-        if context.application:
-            schedule_torrent_monitor(
-                context.application, torrent_id, chat_id,
-                torrent_name, download_path,
-            )
-
-        await query.edit_message_text(
-            f"✅ Торрент добавлен в Transmission!\n"
-            f"Папка: {download_path}\n\n"
-            f"Сообщу когда скачается."
-        )
-    else:
-        await query.edit_message_text(
-            "❌ Не удалось добавить торрент в Transmission.\n\n"
-            "Проверьте:\n"
-            "- Transmission запущен и доступен\n"
-            "- Настройки подключения корректны"
-        )
-
-    context.user_data.pop('magnet_link', None)
+    await _add_torrent_and_notify(query, context, magnet_link, download_path)
 
 
 async def telegram_webhook_handler(request):
