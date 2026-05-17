@@ -6,10 +6,11 @@ Telegram bot to download magnet links via Transmission RPC API
 import os
 import re
 import json
+import time
 import logging
 from typing import Dict, List, Optional
 from dataclasses import dataclass
-from collections import defaultdict
+from collections import Counter, defaultdict
 from urllib.parse import urlparse
 import asyncio
 
@@ -298,12 +299,36 @@ class RuTrackerTorrent:
         return f"{b:.1f} ПБ"
 
 
+class RuTrackerUnavailable(Exception):
+    """RuTracker could not be reached (network/login), as opposed to a
+    successful search that simply returned no results."""
+
+
 class RuTrackerClient:
     BASE_URL = "https://rutracker.org/forum/"
+    RETRY_ATTEMPTS = 3
 
     def __init__(self):
         self.session: Optional[http_requests.Session] = None
         self._authed = False
+
+    def _get(self, path: str, params: Optional[dict] = None):
+        """GET with retry on transient network failures (RuTracker often
+        drops pooled keep-alive sockets -> RemoteDisconnected). Raises
+        RuTrackerUnavailable if every attempt fails."""
+        last = None
+        for i in range(self.RETRY_ATTEMPTS):
+            try:
+                return self.session.get(self.BASE_URL + path,
+                                        params=params, timeout=60)
+            except http_requests.RequestException as exc:
+                last = exc
+                logger.warning(
+                    f"RuTracker GET {path!r} attempt "
+                    f"{i + 1}/{self.RETRY_ATTEMPTS} failed: {exc}")
+                if i + 1 < self.RETRY_ATTEMPTS:
+                    time.sleep(1 + i)  # 1s, then 2s
+        raise RuTrackerUnavailable(str(last))
 
     @staticmethod
     def _is_authed(html: str) -> bool:
@@ -346,25 +371,15 @@ class RuTrackerClient:
 
     def search(self, query: str) -> List[RuTrackerTorrent]:
         if not self._ensure_logged_in():
-            return []
-        try:
-            resp = self.session.get(self.BASE_URL + "tracker.php",
-                                    params={"nm": query}, timeout=60)
-        except http_requests.RequestException as exc:
-            logger.error(f"RuTracker search request failed: {exc}")
-            return []
+            raise RuTrackerUnavailable("login failed")
+        resp = self._get("tracker.php", {"nm": query})
         # Session may have expired -> served as guest. Re-login once.
         if not self._is_authed(resp.text):
             logger.info("RuTracker session expired, re-logging in")
             self._drop_session()
             if not self._ensure_logged_in():
-                return []
-            try:
-                resp = self.session.get(self.BASE_URL + "tracker.php",
-                                        params={"nm": query}, timeout=60)
-            except http_requests.RequestException as exc:
-                logger.error(f"RuTracker search retry failed: {exc}")
-                return []
+                raise RuTrackerUnavailable("re-login failed")
+            resp = self._get("tracker.php", {"nm": query})
         resp.encoding = "windows-1251"
         soup = BeautifulSoup(resp.text, "lxml")
 
@@ -413,7 +428,11 @@ class RuTrackerClient:
     def get_magnet(self, topic_id: str) -> Optional[str]:
         if not self._ensure_logged_in():
             return None
-        resp = self.session.get(self.BASE_URL + f"viewtopic.php?t={topic_id}")
+        try:
+            resp = self._get(f"viewtopic.php?t={topic_id}")
+        except RuTrackerUnavailable as exc:
+            logger.error(f"RuTracker get_magnet failed: {exc}")
+            return None
         resp.encoding = "windows-1251"
         soup = BeautifulSoup(resp.text, "lxml")
         link = soup.select_one("a.magnet-link")
@@ -1070,6 +1089,26 @@ async def _handle_bucket_selection(query, context: ContextTypes.DEFAULT_TYPE) ->
         header, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
+async def _rt_search(msg, query: str):
+    """Run a RuTracker search and, on failure, tell the user honestly.
+    Returns the results list, or None if the user was already notified
+    (network error -> 'try again', vs empty -> 'nothing found')."""
+    try:
+        results = await asyncio.to_thread(rutracker_client.search, query)
+    except RuTrackerUnavailable as exc:
+        logger.error(f"RuTracker unavailable for {query!r}: {exc}")
+        await msg.edit_text(
+            "⚠️ RuTracker сейчас не ответил. "
+            "Попробуй ещё раз через пару секунд.")
+        return None
+    if not results:
+        logger.info(f"RuTracker search {query!r}: 0 results")
+        await msg.edit_text("Ничего не найдено.")
+        return None
+    logger.info(f"RuTracker search {query!r}: {len(results)} results")
+    return results
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle incoming messages: magnet links or search queries."""
     message_text = update.message.text if update.message.text else ""
@@ -1098,9 +1137,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not llm_client:
         msg = await update.message.reply_text(
             f"🔍 Ищу '{query}' на RuTracker...")
-        results = await asyncio.to_thread(rutracker_client.search, query)
-        if not results:
-            await msg.edit_text("Ничего не найдено.")
+        results = await _rt_search(msg, query)
+        if results is None:
             return
         await _show_forum_groups(msg.edit_text, results, context)
         return
@@ -1114,11 +1152,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as exc:
         logger.error(f"LLM intent parse failed: {exc}")
         clean_q, category, llm_failed = query, "any", True
+    logger.info(f"intent: {query!r} -> query={clean_q!r} "
+                f"category={category!r} llm_failed={llm_failed}")
 
     await msg.edit_text(f"🔍 Ищу '{clean_q}' на RuTracker…")
-    results = await asyncio.to_thread(rutracker_client.search, clean_q)
-    if not results:
-        await msg.edit_text("Ничего не найдено.")
+    results = await _rt_search(msg, clean_q)
+    if results is None:
         return
 
     # Intent parse itself failed -> LLM unreliable, raw forum groups.
@@ -1139,6 +1178,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.error(f"LLM classify failed: {exc}")
             classification = None
         if classification:
+            logger.info(
+                f"classify {clean_q!r}: "
+                f"{dict(Counter(classification.values()))}")
             await _show_category_buckets(
                 msg.edit_text, results, context, classification)
         else:
@@ -1155,6 +1197,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.error(f"LLM filter failed: {exc}")
         rel = None
 
+    logger.info(f"filter {clean_q!r} cat={category!r}: "
+                f"kept {len(rel) if rel else 0}/{len(results)}")
     if not rel:
         await _show_forum_groups(
             msg.edit_text, results, context,
