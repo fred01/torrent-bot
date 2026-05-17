@@ -481,17 +481,23 @@ _INTENT_SYSTEM = """\
   НЕ переводи, НЕ транслитерируй, НЕ заменяй на «правильное» или похожее
   название, ничего не «исправляй». Сохрани язык и написание оригинала
   и все уточнения (год, часть, платформу).
-- category: что именно нужно пользователю. Если тип явно не указан
-  словом-указателем — "any".
+- category: определяй СТРОГО по явному слову-указателю В ЗАПРОСЕ
+  (игра, фильм, кино, сериал, музыка, песня, книга, аудиокнига,
+  программа). НЕ угадывай тип по смыслу, теме или звучанию названия —
+  даже если оно похоже на песню, фильм, игру или книгу. Нет явного
+  слова-указателя → category = "any" (тип определят позже по выдаче).
 - Никакого текста кроме JSON."""
 
-# NB: the "Ошибка резидента" example is a deliberate counter-example —
-# it's a real 1968 Soviet film, NOT "Resident Evil". The model must keep
-# the title verbatim instead of "helpfully" substituting a franchise.
+# Deliberate counter-examples:
+# - «Ошибка резидента» is a real 1968 Soviet film, NOT "Resident Evil":
+#   keep the title verbatim, don't substitute a franchise.
+# - «Гуляй, шальная» is a TV series whose name sounds like a song lyric:
+#   without a type word it MUST be "any", not guessed as "music".
 _INTENT_FEWSHOT = (
     'Запрос: игра Warcraft III\nОтвет: {"query": "Warcraft III", "category": "game"}\n'
     'Запрос: фильм Ошибка резидента 1968\nОтвет: {"query": "Ошибка резидента 1968", "category": "movie"}\n'
     'Запрос: Warcraft\nОтвет: {"query": "Warcraft", "category": "any"}\n'
+    'Запрос: Гуляй, шальная\nОтвет: {"query": "Гуляй, шальная", "category": "any"}\n'
     'Запрос: сериал Чернобыль 2019\nОтвет: {"query": "Чернобыль 2019", "category": "tv"}'
 )
 
