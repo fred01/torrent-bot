@@ -8,6 +8,7 @@ import re
 import json
 import time
 import logging
+import threading
 from typing import Dict, List, Optional
 from dataclasses import dataclass
 from collections import Counter, defaultdict
@@ -316,6 +317,14 @@ class RuTrackerClient:
     def __init__(self):
         self.session: Optional[http_requests.Session] = None
         self._authed = False
+        # This client is a shared singleton hit from many asyncio.to_thread
+        # workers at once. session/_authed are mutated by _ensure_logged_in
+        # and _drop_session, so without serialization one thread can null
+        # self.session while another is mid-_request (AttributeError: NoneType
+        # has no attribute 'request'). The lock makes each public op atomic
+        # and, as a bonus, stops parallel retries from hammering the upstream
+        # simultaneously during an outage.
+        self._lock = threading.Lock()
 
     def _request(self, method: str, path: str, **kwargs):
         """HTTP request with retry on transient network errors and
@@ -383,6 +392,10 @@ class RuTrackerClient:
         self._authed = False
 
     def search(self, query: str) -> List[RuTrackerTorrent]:
+        with self._lock:
+            return self._search(query)
+
+    def _search(self, query: str) -> List[RuTrackerTorrent]:
         if not self._ensure_logged_in():
             raise RuTrackerUnavailable("login failed")
         resp = self._get("tracker.php", {"nm": query})
@@ -439,6 +452,10 @@ class RuTrackerClient:
         return results
 
     def get_magnet(self, topic_id: str) -> Optional[str]:
+        with self._lock:
+            return self._get_magnet(topic_id)
+
+    def _get_magnet(self, topic_id: str) -> Optional[str]:
         if not self._ensure_logged_in():
             return None
         try:
