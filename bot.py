@@ -20,6 +20,7 @@ from bs4 import BeautifulSoup
 import transmission_rpc
 from transmission_rpc.error import TransmissionError
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -457,16 +458,36 @@ class RuTrackerClient:
 
     def _get_magnet(self, topic_id: str) -> Optional[str]:
         if not self._ensure_logged_in():
+            logger.error(f"RuTracker get_magnet t={topic_id}: login failed")
             return None
         try:
             resp = self._get(f"viewtopic.php?t={topic_id}")
+            # Session may have expired -> served as guest. Re-login once,
+            # same as _search (previously _get_magnet silently returned a
+            # magnet-less guest page as "no magnet").
+            if not self._is_authed(resp.text):
+                logger.info("RuTracker session expired, re-logging in")
+                self._drop_session()
+                if not self._ensure_logged_in():
+                    logger.error(
+                        f"RuTracker get_magnet t={topic_id}: re-login failed")
+                    return None
+                resp = self._get(f"viewtopic.php?t={topic_id}")
         except RuTrackerUnavailable as exc:
-            logger.error(f"RuTracker get_magnet failed: {exc}")
+            logger.error(f"RuTracker get_magnet t={topic_id} failed: {exc}")
             return None
         resp.encoding = "windows-1251"
         soup = BeautifulSoup(resp.text, "lxml")
         link = soup.select_one("a.magnet-link")
-        return link.get("href") if link else None
+        if not link:
+            # Distinguishes a real topic with no magnet from a guest/error
+            # page that merely lacks one (cause C was previously silent).
+            logger.error(
+                f"RuTracker get_magnet t={topic_id}: no magnet link "
+                f"(authed={self._is_authed(resp.text)}, "
+                f"{len(resp.text)} bytes)")
+            return None
+        return link.get("href")
 
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
@@ -1252,7 +1273,13 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     """Handle callback queries from inline keyboards."""
     query = update.callback_query
     data = query.data
-    await query.answer()
+    try:
+        await query.answer()
+    except BadRequest as exc:
+        # Callback already expired (e.g. user waited out a long RuTracker
+        # retry storm). Non-fatal: we just can't dismiss the spinner —
+        # still try to edit the message with the result below.
+        logger.info(f"callback answer skipped (stale query): {exc}")
 
     if data == "rt_groups":
         results: List[RuTrackerTorrent] = context.user_data.get(
@@ -1420,13 +1447,29 @@ async def telegram_webhook_handler(request):
         data = await request.json()
         update = Update.de_json(data, application.bot)
         
-        # Process the update
-        await application.process_update(update)
-        
+        # Enqueue the update and ack Telegram immediately. Awaiting
+        # process_update here blocked the webhook response on the full
+        # handler run, so multi-minute RuTracker retries serialized
+        # Telegram delivery and expired callback queries ("Query is too
+        # old"). application.start() runs the queue consumer.
+        await application.update_queue.put(update)
+
         return web.Response(text='OK', status=200)
     except Exception as e:
         logger.error(f"Error processing webhook: {e}")
         return web.Response(text='Error', status=500)
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Global error handler. Without one, PTB logs every unhandled
+    exception as 'No error handlers are registered' plus a raw traceback.
+    Log it concisely instead, and swallow the harmless stale-callback
+    BadRequest entirely."""
+    err = context.error
+    if isinstance(err, BadRequest) and "Query is too old" in str(err):
+        logger.info(f"ignored stale callback: {err}")
+        return
+    logger.error(f"unhandled exception in handler: {err!r}", exc_info=err)
 
 
 def main() -> None:
@@ -1436,7 +1479,17 @@ def main() -> None:
         return
     
     # Create the Application
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    # concurrent_updates: process updates in parallel tasks instead of one
+    # at a time, so a multi-minute RuTracker search/magnet no longer blocks
+    # answering an unrelated callback (the other half of the webhook
+    # decoupling). Safe here: RuTrackerClient is lock-serialized, blocking
+    # I/O runs via asyncio.to_thread, and user_data is per-user.
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .concurrent_updates(True)
+        .build()
+    )
     
     # Register handlers
     application.add_handler(CommandHandler("start", start))
@@ -1444,6 +1497,7 @@ def main() -> None:
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(handle_callback))
+    application.add_error_handler(on_error)
     
     if WEBHOOK_MODE:
         # Webhook mode - run with custom web server
