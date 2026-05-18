@@ -307,28 +307,41 @@ class RuTrackerUnavailable(Exception):
 class RuTrackerClient:
     BASE_URL = "https://rutracker.org/forum/"
     RETRY_ATTEMPTS = 3
+    # Transient: pooled keep-alive socket drops (RemoteDisconnected) AND
+    # Cloudflare/origin 5xx (520-524 = CF can't reach the RuTracker origin,
+    # which flaps — esp. on login.php). 5xx is an HTTP response, not an
+    # exception, so it must be checked explicitly to be retried.
+    TRANSIENT_HTTP = {500, 502, 503, 504, 520, 521, 522, 523, 524}
 
     def __init__(self):
         self.session: Optional[http_requests.Session] = None
         self._authed = False
 
-    def _get(self, path: str, params: Optional[dict] = None):
-        """GET with retry on transient network failures (RuTracker often
-        drops pooled keep-alive sockets -> RemoteDisconnected). Raises
-        RuTrackerUnavailable if every attempt fails."""
+    def _request(self, method: str, path: str, **kwargs):
+        """HTTP request with retry on transient network errors and
+        transient HTTP 5xx. Raises RuTrackerUnavailable if all attempts
+        fail."""
+        kwargs.setdefault("timeout", 60)
         last = None
         for i in range(self.RETRY_ATTEMPTS):
             try:
-                return self.session.get(self.BASE_URL + path,
-                                        params=params, timeout=60)
+                resp = self.session.request(
+                    method, self.BASE_URL + path, **kwargs)
             except http_requests.RequestException as exc:
-                last = exc
-                logger.warning(
-                    f"RuTracker GET {path!r} attempt "
-                    f"{i + 1}/{self.RETRY_ATTEMPTS} failed: {exc}")
-                if i + 1 < self.RETRY_ATTEMPTS:
-                    time.sleep(1 + i)  # 1s, then 2s
+                last = f"{type(exc).__name__}: {exc}"
+            else:
+                if resp.status_code not in self.TRANSIENT_HTTP:
+                    return resp
+                last = f"HTTP {resp.status_code}"
+            logger.warning(
+                f"RuTracker {method} {path!r} attempt "
+                f"{i + 1}/{self.RETRY_ATTEMPTS}: {last}")
+            if i + 1 < self.RETRY_ATTEMPTS:
+                time.sleep(1 + i)  # 1s, then 2s
         raise RuTrackerUnavailable(str(last))
+
+    def _get(self, path: str, params: Optional[dict] = None):
+        return self._request("GET", path, params=params)
 
     @staticmethod
     def _is_authed(html: str) -> bool:
@@ -348,12 +361,12 @@ class RuTrackerClient:
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/109.0",
         })
         try:
-            resp = self.session.post(self.BASE_URL + "login.php", data={
+            resp = self._request("POST", "login.php", data={
                 "login_username": RUTRACKER_USERNAME,
                 "login_password": RUTRACKER_PASSWORD,
                 "login": "Вход",
-            }, allow_redirects=True, timeout=60)
-        except http_requests.RequestException as exc:
+            }, allow_redirects=True)
+        except RuTrackerUnavailable as exc:
             logger.error(f"RuTracker login request failed: {exc}")
             self.session = None
             return False
