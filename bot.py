@@ -301,6 +301,50 @@ class RuTrackerTorrent:
         return f"{b:.1f} ПБ"
 
 
+@dataclass
+class TopicDetails:
+    """One topic page's payload: the magnet link plus the cleaned text of
+    the first (release) post — header + description, no media/spoilers."""
+    magnet: Optional[str]
+    info: str
+
+
+# Cap the preview text so the message stays well under Telegram's 4096 limit.
+TOPIC_INFO_MAX = 1800
+
+
+def _extract_post_text(post) -> str:
+    """Plain text of a RuTracker first post: release header + description,
+    with screenshots (<var>/<img>), spoilers (sp-wrap) and scripts removed."""
+    if post is None:
+        return ""
+    for sel in ("var", "img", "script", "style", "div.sp-wrap",
+                "div.sp-head", "div.sp-body", "span.post-hr", ".attach"):
+        for el in post.select(sel):
+            el.decompose()
+    # <br> and block tags -> newlines, so the layout survives get_text.
+    for br in post.find_all("br"):
+        br.replace_with("\n")
+    for tag in post.find_all(["div", "p", "li", "tr", "blockquote",
+                              "h1", "h2", "h3", "ul", "ol"]):
+        tag.append("\n")
+    text = re.sub(r"[ \t]+", " ", post.get_text(""))
+    out, blank = [], 0
+    for raw in text.split("\n"):
+        ln = raw.strip()
+        if not ln:
+            blank += 1
+            if blank <= 1 and out:  # collapse runs of blank lines to one
+                out.append("")
+            continue
+        blank = 0
+        out.append(ln)
+    result = "\n".join(out).strip()
+    if len(result) > TOPIC_INFO_MAX:
+        result = result[:TOPIC_INFO_MAX].rstrip() + "…"
+    return result
+
+
 class RuTrackerUnavailable(Exception):
     """RuTracker could not be reached (network/login), as opposed to a
     successful search that simply returned no results."""
@@ -452,42 +496,44 @@ class RuTrackerClient:
             ))
         return results
 
-    def get_magnet(self, topic_id: str) -> Optional[str]:
+    def get_topic(self, topic_id: str) -> Optional[TopicDetails]:
         with self._lock:
-            return self._get_magnet(topic_id)
+            return self._get_topic(topic_id)
 
-    def _get_magnet(self, topic_id: str) -> Optional[str]:
+    def _get_topic(self, topic_id: str) -> Optional[TopicDetails]:
+        """Fetch a topic page once and return its magnet + first-post text.
+        Returns None only if the page could not be fetched (network/login);
+        a fetched page with no magnet still returns TopicDetails so the
+        info text can be shown."""
         if not self._ensure_logged_in():
-            logger.error(f"RuTracker get_magnet t={topic_id}: login failed")
+            logger.error(f"RuTracker get_topic t={topic_id}: login failed")
             return None
         try:
             resp = self._get(f"viewtopic.php?t={topic_id}")
-            # Session may have expired -> served as guest. Re-login once,
-            # same as _search (previously _get_magnet silently returned a
-            # magnet-less guest page as "no magnet").
+            # Session may have expired -> served as guest. Re-login once.
             if not self._is_authed(resp.text):
                 logger.info("RuTracker session expired, re-logging in")
                 self._drop_session()
                 if not self._ensure_logged_in():
                     logger.error(
-                        f"RuTracker get_magnet t={topic_id}: re-login failed")
+                        f"RuTracker get_topic t={topic_id}: re-login failed")
                     return None
                 resp = self._get(f"viewtopic.php?t={topic_id}")
         except RuTrackerUnavailable as exc:
-            logger.error(f"RuTracker get_magnet t={topic_id} failed: {exc}")
+            logger.error(f"RuTracker get_topic t={topic_id} failed: {exc}")
             return None
         resp.encoding = "windows-1251"
         soup = BeautifulSoup(resp.text, "lxml")
         link = soup.select_one("a.magnet-link")
-        if not link:
-            # Distinguishes a real topic with no magnet from a guest/error
-            # page that merely lacks one (cause C was previously silent).
+        magnet = link.get("href") if link else None
+        if not magnet:
             logger.error(
-                f"RuTracker get_magnet t={topic_id}: no magnet link "
+                f"RuTracker get_topic t={topic_id}: no magnet link "
                 f"(authed={self._is_authed(resp.text)}, "
                 f"{len(resp.text)} bytes)")
-            return None
-        return link.get("href")
+        # First .post_body is the release (OP); later ones are comments.
+        info = _extract_post_text(soup.select_one("div.post_body"))
+        return TopicDetails(magnet=magnet, info=info)
 
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
@@ -1022,6 +1068,8 @@ async def _show_forum_groups(edit, results: List['RuTrackerTorrent'],
         )])
     keyboard.append([InlineKeyboardButton(
         "📋 Все разделы", callback_data="rt_forum:all")])
+    keyboard.append([InlineKeyboardButton(
+        "🔄 Новый поиск", callback_data="rt_cancel")])
     await edit("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
 
 
@@ -1035,11 +1083,15 @@ async def _show_smart_top(edit, selected: List['RuTrackerTorrent'],
     shown = selected[:SMART_TOP_LIMIT]
     context.user_data['rt_selected'] = shown
     context.user_data['rt_category'] = category
+    # Stash enough to re-render this exact screen when "back" returns here.
+    context.user_data['rt_smart'] = {
+        'selected': selected, 'category': category, 'total': total}
+    context.user_data['rt_list_token'] = 'rt_top'
 
     mapping = CATEGORY_TO_DIR.get(category)
     where = f" → «{mapping[0]}»" if mapping else ""
     header = (f"🤖 По типу «{category}» — {len(selected)} из {total}, "
-              f"по сидам. Жми — скачаю{where}:")
+              f"по сидам. Жми для описания{where}:")
     if len(selected) > SMART_TOP_LIMIT:
         header += f"\n(показаны топ-{SMART_TOP_LIMIT})"
 
@@ -1050,6 +1102,8 @@ async def _show_smart_top(edit, selected: List['RuTrackerTorrent'],
     ]
     keyboard.append([InlineKeyboardButton(
         "📋 Все разделы (без фильтра)", callback_data="rt_groups")])
+    keyboard.append([InlineKeyboardButton(
+        "🔄 Новый поиск", callback_data="rt_cancel")])
     await edit(header, reply_markup=InlineKeyboardMarkup(keyboard))
 
 
@@ -1061,6 +1115,8 @@ def _bucket_keyboard(buckets: List[dict]) -> List[List[InlineKeyboardButton]]:
     ]
     kb.append([InlineKeyboardButton(
         "📋 Все разделы (форумы)", callback_data="rt_groups")])
+    kb.append([InlineKeyboardButton(
+        "🔄 Новый поиск", callback_data="rt_cancel")])
     return kb
 
 
@@ -1128,6 +1184,7 @@ async def _handle_bucket_selection(query, context: ContextTypes.DEFAULT_TYPE) ->
     shown = selected[:SMART_TOP_LIMIT]
     context.user_data['rt_selected'] = shown
     context.user_data['rt_category'] = b['cat']  # enables auto-folder
+    context.user_data['rt_list_token'] = f"rt_cat:{n}"  # "back" target
 
     mapping = CATEGORY_TO_DIR.get(b['cat'])
     where = f" → «{mapping[0]}»" if mapping else ""
@@ -1140,8 +1197,10 @@ async def _handle_bucket_selection(query, context: ContextTypes.DEFAULT_TYPE) ->
                               callback_data=f"rt_torrent:{i}")]
         for i, t in enumerate(shown)
     ]
-    keyboard.append([InlineKeyboardButton(
-        "⬅️ Категории", callback_data="rt_buckets")])
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Категории", callback_data="rt_buckets"),
+        InlineKeyboardButton("🔄 Новый поиск", callback_data="rt_cancel"),
+    ])
     await query.edit_message_text(
         header, reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -1289,8 +1348,26 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "❌ Результаты поиска устарели. Попробуйте снова.")
             return
         await _show_forum_groups(query.edit_message_text, results, context)
+    elif data == "rt_top":
+        smart = context.user_data.get('rt_smart')
+        if not smart:
+            await query.edit_message_text(
+                "❌ Результаты поиска устарели. Попробуйте снова.")
+            return
+        await _show_smart_top(query.edit_message_text, smart['selected'],
+                              context, smart['category'], smart['total'])
     elif data == "rt_buckets":
         await _reshow_buckets(query, context)
+    elif data == "rt_cancel":
+        await _handle_cancel(query, context)
+    elif data == "rt_dl":
+        await _handle_download_confirm(query, context)
+    elif data == "rt_pickdir":
+        await _handle_pick_dir(query, context)
+    elif data == "rt_prev":
+        await _render_preview(query, context)
+    elif data.startswith("rt_setdir:"):
+        await _handle_set_dir(query, context)
     elif data.startswith("rt_cat:"):
         await _handle_bucket_selection(query, context)
     elif data.startswith("rt_forum:"):
@@ -1327,14 +1404,19 @@ async def _handle_forum_selection(query, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
     context.user_data['rt_selected'] = selected
+    context.user_data['rt_list_token'] = f"rt_forum:{choice}"  # "back" target
 
     title = "📋 Все разделы" if choice == "all" else f"📂 {forum}"
-    header = f"{title} — {len(selected)} раздач. Жми для скачивания:"
+    header = f"{title} — {len(selected)} раздач. Жми для описания:"
     keyboard = [
         [InlineKeyboardButton(_torrent_button_label(t),
                               callback_data=f"rt_torrent:{i}")]
         for i, t in enumerate(selected)
     ]
+    keyboard.append([
+        InlineKeyboardButton("⬅️ Разделы", callback_data="rt_groups"),
+        InlineKeyboardButton("🔄 Новый поиск", callback_data="rt_cancel"),
+    ])
     await query.edit_message_text(
         header, reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -1374,6 +1456,9 @@ async def _add_torrent_and_notify(query, context: ContextTypes.DEFAULT_TYPE,
 
 
 async def _handle_torrent_selection(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tapped a torrent -> fetch its page and show a preview (release header
+    + description) with download/back buttons, instead of grabbing the
+    magnet and downloading straight away."""
     try:
         idx = int(query.data.replace("rt_torrent:", ""))
     except ValueError:
@@ -1387,36 +1472,125 @@ async def _handle_torrent_selection(query, context: ContextTypes.DEFAULT_TYPE) -
 
     torrent = selected[idx]
     await query.edit_message_text(
-        f"⏳ Получаю magnet-ссылку:\n{torrent.title[:100]}…")
+        f"⏳ Загружаю карточку:\n{torrent.title[:100]}…")
 
-    magnet = await asyncio.to_thread(rutracker_client.get_magnet, torrent.topic_id)
-    if not magnet:
-        await query.edit_message_text("❌ Не удалось получить magnet-ссылку.")
+    details = await asyncio.to_thread(
+        rutracker_client.get_topic, torrent.topic_id)
+    if details is None:
+        await query.edit_message_text("❌ Не удалось получить данные торрента.")
         return
 
+    # Pre-select the folder from the detected category (if any); the user
+    # can change it in the preview before downloading.
     category = context.user_data.get('rt_category')
     mapping = CATEGORY_TO_DIR.get(category) if category else None
+    context.user_data['rt_preview'] = {
+        'magnet': details.magnet,
+        'title': torrent.title,
+        'size': torrent.size_human,
+        'seeds': torrent.seeds,
+        'info': details.info,
+    }
+    context.user_data['rt_dl_dir'] = tuple(mapping) if mapping else None
+    await _render_preview(query, context)
 
-    context.user_data.pop('rt_results', None)
-    context.user_data.pop('rt_forums', None)
-    context.user_data.pop('rt_selected', None)
 
-    # Category known from the LLM search -> skip the folder picker.
-    if mapping:
-        dir_label, download_path = mapping
-        context.user_data.pop('rt_category', None)
-        await _add_torrent_and_notify(
-            query, context, magnet, download_path,
-            dir_label=dir_label, title=torrent.title)
+async def _render_preview(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the torrent card: header+description text and action buttons —
+    [⬇️ Скачать в «folder»] + [📁 Сменить папку] (or [📁 Выбрать папку] when
+    no category was detected), plus back / new-search."""
+    pv = context.user_data.get('rt_preview')
+    if not pv:
+        await query.edit_message_text(
+            "❌ Результаты поиска устарели. Попробуйте снова.")
         return
-
-    context.user_data['magnet_link'] = magnet
+    dl = context.user_data.get('rt_dl_dir')
+    text = (f"🧲 {pv['title'][:150]}\n"
+            f"{pv['size']} | 🌱 {pv['seeds']} сидов\n\n"
+            f"{pv['info'] or '(описание недоступно)'}")
+    rows = []
+    if pv['magnet']:
+        if dl:
+            rows.append([InlineKeyboardButton(
+                f"⬇️ Скачать в «{dl[0]}»", callback_data="rt_dl")])
+            rows.append([InlineKeyboardButton(
+                f"📁 Сменить папку ({dl[0]})", callback_data="rt_pickdir")])
+        else:
+            rows.append([InlineKeyboardButton(
+                "📁 Выбрать папку и скачать", callback_data="rt_pickdir")])
+    else:
+        text += "\n\n⚠️ Magnet-ссылку получить не удалось."
+    back = context.user_data.get('rt_list_token', 'rt_cancel')
+    rows.append([
+        InlineKeyboardButton("⬅️ Назад", callback_data=back),
+        InlineKeyboardButton("🔄 Новый поиск", callback_data="rt_cancel"),
+    ])
     await query.edit_message_text(
-        f"🧲 {torrent.title[:100]}\n"
-        f"{torrent.size_human} | 🌱 {torrent.seeds} сидов\n\n"
-        f"Выберите папку для скачивания:",
-        reply_markup=_build_download_keyboard(),
-    )
+        text, reply_markup=InlineKeyboardMarkup(rows))
+
+
+def _clear_rt_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Drop all per-search/preview state (a completed download or a cancel)."""
+    for k in ('rt_results', 'rt_forums', 'rt_selected', 'rt_buckets',
+              'rt_smart', 'rt_preview', 'rt_dl_dir', 'rt_list_token',
+              'rt_category', 'magnet_link'):
+        context.user_data.pop(k, None)
+
+
+async def _handle_download_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """⬇️ Скачать from the preview: add the cached magnet to the chosen dir."""
+    pv = context.user_data.get('rt_preview')
+    if not pv or not pv.get('magnet'):
+        await query.edit_message_text(
+            "❌ Результаты поиска устарели. Попробуйте снова.")
+        return
+    dl = context.user_data.get('rt_dl_dir')
+    if not dl:  # no folder picked yet -> ask first
+        await _handle_pick_dir(query, context)
+        return
+    label, path = dl
+    title, magnet = pv['title'], pv['magnet']
+    _clear_rt_state(context)
+    await _add_torrent_and_notify(
+        query, context, magnet, path, dir_label=label, title=title)
+
+
+async def _handle_pick_dir(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """📁 from the preview: list folders; picking returns to the preview."""
+    if not context.user_data.get('rt_preview'):
+        await query.edit_message_text(
+            "❌ Результаты поиска устарели. Попробуйте снова.")
+        return
+    dirs = transmission_client.get_download_dirs()
+    rows = [[InlineKeyboardButton(label, callback_data=f"rt_setdir:{path}")]
+            for label, path in dirs.items()]
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="rt_prev")])
+    await query.edit_message_text(
+        "📁 Выбери папку для скачивания:",
+        reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def _handle_set_dir(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    path = query.data[len("rt_setdir:"):]
+    dirs = transmission_client.get_download_dirs()
+    label = next((lbl for lbl, p in dirs.items() if p == path), path)
+    context.user_data['rt_dl_dir'] = (label, path)
+    await _render_preview(query, context)
+
+
+async def _handle_cancel(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """🔄 Новый поиск: clear state and remove the results message so the
+    user can start fresh (falls back to editing it if delete fails)."""
+    _clear_rt_state(context)
+    prompt = "🔍 Напиши новый запрос для поиска."
+    chat_id = query.message.chat_id if query.message else query.from_user.id
+    try:
+        await query.message.delete()
+    except Exception as exc:
+        logger.info(f"cancel: message delete failed: {exc}")
+        await query.edit_message_text(prompt)
+        return
+    await query.get_bot().send_message(chat_id, prompt)
 
 
 async def _handle_download_selection(query, context: ContextTypes.DEFAULT_TYPE) -> None:
