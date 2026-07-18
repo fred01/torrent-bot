@@ -67,6 +67,11 @@ WEBHOOK_SECRET_TOKEN = os.getenv('WEBHOOK_SECRET_TOKEN')
 # Bearer token protecting the /mcp endpoint (empty = MCP disabled).
 MCP_AUTH_TOKEN = os.getenv('MCP_AUTH_TOKEN', '')
 
+# Telegram chat id to notify when a torrent added via /mcp finishes downloading
+# (empty = no notification). Torrents added through the Telegram flow already
+# notify the chat that added them; MCP has no chat context, so it uses this one.
+MCP_NOTIFY_CHAT_ID = os.getenv('MCP_NOTIFY_CHAT_ID', '')
+
 # Default download directories if not available from Transmission
 DEFAULT_DOWNLOAD_DIRS = {
     '🎬 Movies': '/downloads/complete/movies',
@@ -159,7 +164,8 @@ def _mcp_tools():
                             'asks for — do NOT look for, install or use a command-line torrent '
                             'client (transmission-cli, aria2, etc.) and do NOT check the shell; '
                             'Transmission is already set up and running. Get the magnet from '
-                            'torrent_search results (or the user); "category" picks the folder.'),
+                            'torrent_search results (or the user); "category" picks the folder. '
+                            'A Telegram notification is sent automatically when the download finishes.'),
             'inputSchema': {
                 'type': 'object',
                 'required': ['magnet'],
@@ -221,7 +227,7 @@ def _mcp_do_list_torrents(limit: int):
     return {'count': len(torrents), 'returned': len(out), 'torrents': out}
 
 
-async def _mcp_tool_call(name, arguments):
+async def _mcp_tool_call(name, arguments, application=None):
     """Returns (text, is_error). Blocking RPC runs in an executor."""
     loop = asyncio.get_event_loop()
     if name == 'add_torrent':
@@ -232,6 +238,15 @@ async def _mcp_tool_call(name, arguments):
         res = await loop.run_in_executor(None, _mcp_do_add_torrent, magnet, category)
         if res is None:
             return 'error: failed to add torrent (see bot logs / Transmission status)', True
+        # Notify a fixed Telegram chat on completion (reuses the same monitor the
+        # Telegram flow uses). No chat context here, so it targets MCP_NOTIFY_CHAT_ID.
+        if application is not None and MCP_NOTIFY_CHAT_ID and res.get('id') is not None:
+            try:
+                schedule_torrent_monitor(application, res['id'], int(MCP_NOTIFY_CHAT_ID),
+                                         res.get('name') or 'torrent', res.get('download_dir') or '')
+                res['notify_on_complete'] = True
+            except Exception as exc:
+                logger.warning(f"MCP: failed to schedule completion monitor: {exc}")
         return json.dumps(res, ensure_ascii=False), False
     if name == 'list_torrents':
         limit = int(arguments.get('limit') or 25)
@@ -251,7 +266,7 @@ def _mcp_error(rpc_id, code, message):
     return {'jsonrpc': '2.0', 'id': rpc_id, 'error': {'code': code, 'message': message}}
 
 
-async def _mcp_dispatch(req):
+async def _mcp_dispatch(req, application=None):
     """Handle a single JSON-RPC request object. Returns dict, or None for notifications."""
     rpc_id = req.get('id')
     method = req.get('method')
@@ -273,7 +288,7 @@ async def _mcp_dispatch(req):
         name = params.get('name')
         arguments = params.get('arguments') or {}
         try:
-            text, is_error = await _mcp_tool_call(name, arguments)
+            text, is_error = await _mcp_tool_call(name, arguments, application)
         except Exception as e:
             text, is_error = f'internal error: {e}', True
         return _mcp_result(rpc_id, {'content': [{'type': 'text', 'text': text}], 'isError': is_error})
@@ -285,6 +300,7 @@ async def mcp_handler(request):
     auth = request.headers.get('Authorization', '')
     if not MCP_AUTH_TOKEN or auth != f'Bearer {MCP_AUTH_TOKEN}':
         return web.json_response({'error': 'unauthorized'}, status=401)
+    application = request.app.get('telegram_application')
     try:
         body = await request.json()
     except Exception:
@@ -292,7 +308,7 @@ async def mcp_handler(request):
     if isinstance(body, list):
         results = []
         for item in body:
-            r = await _mcp_dispatch(item) if isinstance(item, dict) else None
+            r = await _mcp_dispatch(item, application) if isinstance(item, dict) else None
             if r is not None:
                 results.append(r)
         if not results:
@@ -300,7 +316,7 @@ async def mcp_handler(request):
         return web.json_response(results)
     if not isinstance(body, dict):
         return web.json_response(_mcp_error(None, -32600, 'Invalid Request'), status=200)
-    result = await _mcp_dispatch(body)
+    result = await _mcp_dispatch(body, application)
     if result is None:
         return web.Response(status=202)
     return web.json_response(result)

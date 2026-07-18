@@ -86,6 +86,10 @@ spec:
           value: "true"
         - name: WEBHOOK_URL
           value: "https://torrent-bot.svc.fred.org.ru/update"
+        # Telegram chat to notify when a torrent added via /mcp (agent) finishes.
+        # Not a secret — it is a chat id. Owner's Telegram user id.
+        - name: MCP_NOTIFY_CHAT_ID
+          value: "154150335"
         ports:
         - name: http
           containerPort: 8080
