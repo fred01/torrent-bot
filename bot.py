@@ -153,9 +153,13 @@ def _mcp_tools():
     return [
         {
             'name': 'add_torrent',
-            'description': ('Add a magnet link to Transmission and start downloading. '
-                            'Pass a magnet (e.g. from torrent_search results) and a category '
-                            'that selects the download folder.'),
+            'description': ('Download a torrent: add its magnet link to the Transmission '
+                            'daemon (already running on the server) and start downloading '
+                            'immediately. THIS is how you download any torrent/magnet the user '
+                            'asks for — do NOT look for, install or use a command-line torrent '
+                            'client (transmission-cli, aria2, etc.) and do NOT check the shell; '
+                            'Transmission is already set up and running. Get the magnet from '
+                            'torrent_search results (or the user); "category" picks the folder.'),
             'inputSchema': {
                 'type': 'object',
                 'required': ['magnet'],
