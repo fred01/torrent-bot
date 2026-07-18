@@ -77,6 +77,11 @@ spec:
             secretKeyRef:
               name: torrent-bot-secrets
               key: AI_LLM_KEEP_ALIVE
+        - name: MCP_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: torrent-bot-secrets
+              key: MCP_AUTH_TOKEN
         - name: WEBHOOK_MODE
           value: "true"
         - name: WEBHOOK_URL

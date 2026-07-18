@@ -61,6 +61,15 @@ if [ -z "$WEBHOOK_SECRET_TOKEN" ]; then
     echo "Consider adding this to your .env file for future deployments"
 fi
 
+# Generate MCP_AUTH_TOKEN if not set (Bearer for the /mcp endpoint). Keep it in
+# sync with litellm-secret TORRENT_BOT_MCP_TOKEN if you use the MCP gateway.
+if [ -z "$MCP_AUTH_TOKEN" ]; then
+    echo "MCP_AUTH_TOKEN not found in .env file, generating a new one..."
+    MCP_AUTH_TOKEN=$(openssl rand -hex 32)
+    echo "Generated MCP_AUTH_TOKEN: $MCP_AUTH_TOKEN"
+    echo "Consider adding this to your .env file for future deployments"
+fi
+
 # Base64 encode the secrets
 TELEGRAM_BOT_TOKEN_B64=$(b64 "$TELEGRAM_BOT_TOKEN")
 TRANSMISSION_URL_B64=$(b64 "$TRANSMISSION_URL")
@@ -73,6 +82,7 @@ AI_LLM_API_BASE_URL_B64=$(b64 "$AI_LLM_API_BASE_URL")
 AI_LLM_API_KEY_B64=$(b64 "$AI_LLM_API_KEY")
 AI_LLM_MODEL_B64=$(b64 "$AI_LLM_MODEL")
 AI_LLM_KEEP_ALIVE_B64=$(b64 "$AI_LLM_KEEP_ALIVE")
+MCP_AUTH_TOKEN_B64=$(b64 "$MCP_AUTH_TOKEN")
 
 # Create temporary files for manifests
 TEMP_SECRETS=$(mktemp)
@@ -96,7 +106,8 @@ sed "s|{{ TELEGRAM_BOT_TOKEN_PLACEHOLDER }}|$TELEGRAM_BOT_TOKEN_B64|g; \
      s|{{ AI_LLM_API_BASE_URL_PLACEHOLDER }}|$AI_LLM_API_BASE_URL_B64|g; \
      s|{{ AI_LLM_API_KEY_PLACEHOLDER }}|$AI_LLM_API_KEY_B64|g; \
      s|{{ AI_LLM_MODEL_PLACEHOLDER }}|$AI_LLM_MODEL_B64|g; \
-     s|{{ AI_LLM_KEEP_ALIVE_PLACEHOLDER }}|$AI_LLM_KEEP_ALIVE_B64|g" \
+     s|{{ AI_LLM_KEEP_ALIVE_PLACEHOLDER }}|$AI_LLM_KEEP_ALIVE_B64|g; \
+     s|{{ MCP_AUTH_TOKEN_PLACEHOLDER }}|$MCP_AUTH_TOKEN_B64|g" \
     torrent-bot-secrets.yaml > "$TEMP_SECRETS"
 
 # Replace version placeholder in deployment template

@@ -64,6 +64,9 @@ WEBHOOK_MODE = os.getenv('WEBHOOK_MODE', 'false').lower() == 'true'
 WEBHOOK_URL = os.getenv('WEBHOOK_URL', 'https://torrent-bot.svc.fred.org.ru/update')
 WEBHOOK_SECRET_TOKEN = os.getenv('WEBHOOK_SECRET_TOKEN')
 
+# Bearer token protecting the /mcp endpoint (empty = MCP disabled).
+MCP_AUTH_TOKEN = os.getenv('MCP_AUTH_TOKEN', '')
+
 # Default download directories if not available from Transmission
 DEFAULT_DOWNLOAD_DIRS = {
     '🎬 Movies': '/downloads/complete/movies',
@@ -113,8 +116,190 @@ async def status_handler(request):
     
     # Generate HTML status page
     html_content = generate_status_page(transmission_status)
-    
+
     return web.Response(text=html_content, content_type='text/html', status=200)
+
+
+# ---------------------------------------------------------------------------
+# MCP server (Streamable-HTTP transport, JSON-RPC 2.0 on a single /mcp route).
+#
+# Exposes the "act" side of the torrent workflow to LLM agents (via the litellm
+# MCP gateway) as a companion to the read-only `torrent_search` MCP: add a magnet
+# to Transmission and inspect what is downloading. Implemented as a plain aiohttp
+# handler (the app is aiohttp, not Starlette) — same shape as the Kotlin
+# torrent-search MCP. Bearer-authenticated.
+# ---------------------------------------------------------------------------
+
+MCP_PROTOCOL_VERSION = '2025-06-18'
+
+# Clean category name -> (button label, download dir). Reuses CATEGORY_TO_DIR.
+_MCP_DEFAULT_DIR = '/downloads/complete/other'
+
+
+def _mcp_human_size(num) -> str:
+    try:
+        b = float(num)
+    except (TypeError, ValueError):
+        return ''
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if b < 1024:
+            return f"{b:.1f} {unit}"
+        b /= 1024
+    return f"{b:.1f} PB"
+
+
+def _mcp_tools():
+    categories = sorted(CATEGORY_TO_DIR.keys())
+    return [
+        {
+            'name': 'add_torrent',
+            'description': ('Add a magnet link to Transmission and start downloading. '
+                            'Pass a magnet (e.g. from torrent_search results) and a category '
+                            'that selects the download folder.'),
+            'inputSchema': {
+                'type': 'object',
+                'required': ['magnet'],
+                'properties': {
+                    'magnet': {'type': 'string', 'description': 'magnet:?xt=urn:btih:... link.'},
+                    'category': {'type': 'string', 'enum': categories,
+                                 'description': 'Download category (folder). Default "other".'},
+                },
+            },
+        },
+        {
+            'name': 'list_torrents',
+            'description': 'List torrents currently in Transmission with progress and status.',
+            'inputSchema': {
+                'type': 'object',
+                'properties': {
+                    'limit': {'type': 'integer', 'description': 'Max torrents to return (default 25).'},
+                },
+            },
+        },
+        {
+            'name': 'transmission_status',
+            'description': 'Transmission connection status: version, download dir, active torrents.',
+            'inputSchema': {'type': 'object', 'properties': {}},
+        },
+    ]
+
+
+def _mcp_do_add_torrent(magnet: str, category: str):
+    label_dir = CATEGORY_TO_DIR.get((category or 'other').lower())
+    download_dir = label_dir[1] if label_dir else _MCP_DEFAULT_DIR
+    torrent = transmission_client.add_torrent(magnet, download_dir)
+    if torrent is None:
+        return None
+    return {
+        'id': getattr(torrent, 'id', None),
+        'name': getattr(torrent, 'name', None),
+        'hash': getattr(torrent, 'hashString', None),
+        'download_dir': download_dir,
+        'category': (category or 'other').lower(),
+    }
+
+
+def _mcp_do_list_torrents(limit: int):
+    if not transmission_client.client:
+        return {'error': 'Transmission client not available'}
+    torrents = transmission_client.client.get_torrents()
+    out = []
+    for t in torrents[:limit]:
+        out.append({
+            'id': getattr(t, 'id', None),
+            'name': getattr(t, 'name', None),
+            'percent_done': round(float(getattr(t, 'percent_done', 0)) * 100, 1),
+            'status': str(getattr(t, 'status', '')),
+            'size': _mcp_human_size(getattr(t, 'total_size', None)),
+            'rate_download': _mcp_human_size(getattr(t, 'rate_download', 0)) + '/s',
+            'eta': str(getattr(t, 'eta', '')),
+        })
+    return {'count': len(torrents), 'returned': len(out), 'torrents': out}
+
+
+async def _mcp_tool_call(name, arguments):
+    """Returns (text, is_error). Blocking RPC runs in an executor."""
+    loop = asyncio.get_event_loop()
+    if name == 'add_torrent':
+        magnet = (arguments.get('magnet') or '').strip()
+        if not magnet.startswith('magnet:'):
+            return 'error: "magnet" must be a magnet: link', True
+        category = arguments.get('category') or 'other'
+        res = await loop.run_in_executor(None, _mcp_do_add_torrent, magnet, category)
+        if res is None:
+            return 'error: failed to add torrent (see bot logs / Transmission status)', True
+        return json.dumps(res, ensure_ascii=False), False
+    if name == 'list_torrents':
+        limit = int(arguments.get('limit') or 25)
+        res = await loop.run_in_executor(None, _mcp_do_list_torrents, max(1, min(limit, 200)))
+        return json.dumps(res, ensure_ascii=False), False
+    if name == 'transmission_status':
+        res = await loop.run_in_executor(None, get_transmission_status)
+        return json.dumps(res, ensure_ascii=False), False
+    return f'unknown tool: {name}', True
+
+
+def _mcp_result(rpc_id, result):
+    return {'jsonrpc': '2.0', 'id': rpc_id, 'result': result}
+
+
+def _mcp_error(rpc_id, code, message):
+    return {'jsonrpc': '2.0', 'id': rpc_id, 'error': {'code': code, 'message': message}}
+
+
+async def _mcp_dispatch(req):
+    """Handle a single JSON-RPC request object. Returns dict, or None for notifications."""
+    rpc_id = req.get('id')
+    method = req.get('method')
+    params = req.get('params') or {}
+    if rpc_id is None:
+        return None  # notification
+    if method == 'initialize':
+        return _mcp_result(rpc_id, {
+            'protocolVersion': MCP_PROTOCOL_VERSION,
+            'capabilities': {'tools': {}},
+            'serverInfo': {'name': 'torrent-bot', 'version': '1.0.0'},
+            'instructions': 'Add torrents to Transmission and inspect downloads. Companion to the torrent_search MCP.',
+        })
+    if method == 'ping':
+        return _mcp_result(rpc_id, {})
+    if method == 'tools/list':
+        return _mcp_result(rpc_id, {'tools': _mcp_tools()})
+    if method == 'tools/call':
+        name = params.get('name')
+        arguments = params.get('arguments') or {}
+        try:
+            text, is_error = await _mcp_tool_call(name, arguments)
+        except Exception as e:
+            text, is_error = f'internal error: {e}', True
+        return _mcp_result(rpc_id, {'content': [{'type': 'text', 'text': text}], 'isError': is_error})
+    return _mcp_error(rpc_id, -32601, f'Method not found: {method}')
+
+
+async def mcp_handler(request):
+    """MCP Streamable-HTTP endpoint (JSON-RPC 2.0). Bearer-authenticated."""
+    auth = request.headers.get('Authorization', '')
+    if not MCP_AUTH_TOKEN or auth != f'Bearer {MCP_AUTH_TOKEN}':
+        return web.json_response({'error': 'unauthorized'}, status=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response(_mcp_error(None, -32700, 'Parse error'), status=200)
+    if isinstance(body, list):
+        results = []
+        for item in body:
+            r = await _mcp_dispatch(item) if isinstance(item, dict) else None
+            if r is not None:
+                results.append(r)
+        if not results:
+            return web.Response(status=202)
+        return web.json_response(results)
+    if not isinstance(body, dict):
+        return web.json_response(_mcp_error(None, -32600, 'Invalid Request'), status=200)
+    result = await _mcp_dispatch(body)
+    if result is None:
+        return web.Response(status=202)
+    return web.json_response(result)
 
 
 def get_transmission_status():
@@ -1704,6 +1889,10 @@ def main() -> None:
             app.router.add_post('/update', telegram_webhook_handler)
             app.router.add_get(HEALTHZ_PATH, healthz_handler)
             app.router.add_get('/status', status_handler)
+            # MCP endpoint (both with and without trailing slash — litellm's gateway
+            # mount requires the trailing-slash form).
+            app.router.add_post('/mcp', mcp_handler)
+            app.router.add_post('/mcp/', mcp_handler)
             
             # Start the web server with custom access logger
             class CustomAccessLogger(web.AccessLogger):
@@ -1718,7 +1907,7 @@ def main() -> None:
             await site.start()
             
             logger.info("Web server started on port 8080")
-            logger.info("Available endpoints: /update, /healthz, /status")
+            logger.info("Available endpoints: /update, /healthz, /status, /mcp")
             
             # Keep running
             try:
