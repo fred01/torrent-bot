@@ -90,6 +90,12 @@ spec:
         # Not a secret — it is a chat id. Owner's Telegram user id.
         - name: MCP_NOTIFY_CHAT_ID
           value: "154150335"
+        # Only these Telegram user ids may talk to the bot. Anyone can find
+        # @transmission22bot and, before this was set, queue downloads onto
+        # our Transmission (that is how "The Odyssey" showed up 2026-08-04).
+        # Empty value = nobody gets in, on purpose.
+        - name: ALLOWED_USER_IDS
+          value: "154150335"
         ports:
         - name: http
           containerPort: 8080

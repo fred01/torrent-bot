@@ -67,6 +67,26 @@ WEBHOOK_SECRET_TOKEN = os.getenv('WEBHOOK_SECRET_TOKEN')
 # Bearer token protecting the /mcp endpoint (empty = MCP disabled).
 MCP_AUTH_TOKEN = os.getenv('MCP_AUTH_TOKEN', '')
 
+# Telegram user ids allowed to talk to the bot, comma-separated. The bot is
+# reachable by anyone who finds its @username, so this is the only thing
+# standing between strangers and our Transmission. Deliberately fail-closed:
+# an empty/unparsable list means nobody gets in (a typo must not silently
+# reopen the bot to the world).
+def _parse_allowed_user_ids(raw: str) -> set:
+    ids = set()
+    for chunk in raw.replace(';', ',').split(','):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            ids.add(int(chunk))
+        except ValueError:
+            logger.error(f"ALLOWED_USER_IDS: ignoring non-numeric entry {chunk!r}")
+    return ids
+
+
+ALLOWED_USER_IDS = _parse_allowed_user_ids(os.getenv('ALLOWED_USER_IDS', ''))
+
 # Telegram chat id to notify when a torrent added via /mcp finishes downloading
 # (empty = no notification). Torrents added through the Telegram flow already
 # notify the chat that added them; MCP has no chat context, so it uses this one.
@@ -1167,8 +1187,40 @@ async def monitor_torrent_completion(context: ContextTypes.DEFAULT_TYPE) -> None
             _remove_torrent_job(context.application, torrent_id, active_job=job)
 
 
+def _describe_user(update: Update) -> str:
+    """Who sent this update — for the audit line in the log."""
+    user = update.effective_user
+    if not user:
+        return "unknown"
+    handle = f"@{user.username}" if user.username else user.full_name
+    return f"{user.id} ({handle})"
+
+
+async def _guard(update: Update) -> bool:
+    """Gate every user-facing entry point. Logs who is knocking either way,
+    so 'who queued this torrent?' is answerable from the log alone."""
+    user = update.effective_user
+    uid = user.id if user else None
+
+    if uid in ALLOWED_USER_IDS:
+        return True
+
+    logger.warning(f"DENIED update from {_describe_user(update)}")
+    reply = "⛔️ Этот бот приватный."
+    try:
+        if update.callback_query:
+            await update.callback_query.answer(reply, show_alert=True)
+        elif update.effective_message:
+            await update.effective_message.reply_text(reply)
+    except Exception as exc:  # a stale callback / blocked bot must not crash us
+        logger.info(f"denial notice not delivered: {exc}")
+    return False
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /start is issued."""
+    if not await _guard(update):
+        return
     search_hint = "\n📝 Или просто напишите название — поищу на RuTracker!" if RUTRACKER_USERNAME else ""
     welcome_message = (
         "🤖 Welcome to Torrent Bot!\n\n"
@@ -1184,6 +1236,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send a message when the command /help is issued."""
+    if not await _guard(update):
+        return
     search_section = (
         "\n🔍 Поиск на RuTracker:\n"
         "1. Напишите название (например: Семь самураев)\n"
@@ -1206,6 +1260,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Check Transmission connection status."""
+    if not await _guard(update):
+        return
     try:
         if transmission_client.client:
             session = transmission_client.client.get_session()
@@ -1432,6 +1488,10 @@ async def _rt_search(msg, query: str):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle incoming messages: magnet links or search queries."""
+    if not await _guard(update):
+        return
+    logger.info(f"message from {_describe_user(update)}: "
+                f"{(update.message.text or '')[:120]!r}")
     message_text = update.message.text if update.message.text else ""
     magnet_links = extract_magnet_links(message_text)
 
@@ -1535,8 +1595,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle callback queries from inline keyboards."""
+    if not await _guard(update):
+        return
     query = update.callback_query
     data = query.data
+    logger.info(f"callback from {_describe_user(update)}: {data!r}")
     try:
         await query.answer()
     except BadRequest as exc:
@@ -1870,6 +1933,13 @@ def main() -> None:
         .build()
     )
     
+    if ALLOWED_USER_IDS:
+        logger.info(f"Access limited to user ids: "
+                    f"{sorted(ALLOWED_USER_IDS)}")
+    else:
+        logger.warning("ALLOWED_USER_IDS is empty — the bot will refuse "
+                       "everyone. Set it to your Telegram user id.")
+
     # Register handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
